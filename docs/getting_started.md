@@ -83,6 +83,49 @@ result = populate_jit(halo_positions, halo_masses, halo_radii, key)
 gal_positions = result['positions'][result['mask']]
 ```
 
+## Using AbacusSummit halos
+
+`jax-hod` ships with a reader for the
+[AbacusSummit](https://abacussummit.readthedocs.io) simulation suite.
+It wraps `abacusutils` (install with `pip install jax-hod[abacus]`) and
+returns arrays in the format expected by `populate`.
+
+```python
+import jax
+from jaxhod import Zheng07, populate
+from jaxhod.simulations import load_abacus_halos
+
+# Load halos from AbacusSummit_base_c000_ph000 at z=0.5
+halos = load_abacus_halos(
+    sim_dir='/global/cfs/cdirs/desi/cosmosim/Abacus',
+    cosmology='c000',
+    phase='ph000',
+    redshift=0.5,
+    min_mass=1e12,    # Msun/h — skip poorly-resolved halos
+)
+
+# halos['positions']  : (N, 3) Mpc/h
+# halos['masses']     : (N,)   Msun/h
+# halos['radii']      : (N,)   Mpc/h  (r100 of the L2 subhalo)
+# halos['velocities'] : (N, 3) km/s
+# halos['header']     : dict with BoxSize, ParticleMassHMsun, etc.
+
+# Populate with the Zheng+07 HOD model
+model = Zheng07(log_Mmin=13.0, sigma_logM=0.5, log_M0=13.0, log_M1=14.0, alpha=1.0)
+key = jax.random.PRNGKey(0)
+
+result = populate(
+    halos['positions'],
+    halos['masses'],
+    halos['radii'],
+    model,
+    key,
+)
+```
+
+The `header` dict contains the full simulation metadata, including `BoxSize`
+(Mpc/h) and `ParticleMassHMsun`, which you may need for downstream analysis.
+
 ## Example notebook
 
 A worked example covering all of the above, including profile comparisons and

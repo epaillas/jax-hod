@@ -1,5 +1,13 @@
 # API reference
 
+## Simulation readers
+
+```{eval-rst}
+.. autofunction:: jaxhod.simulations.abacus.load_abacus_halos
+```
+
+
+
 ## Population
 
 ```{eval-rst}

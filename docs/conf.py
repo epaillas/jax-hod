@@ -25,7 +25,7 @@ napoleon_numpy_docstring = True
 napoleon_google_docstring = False
 autodoc_member_order = 'bysource'
 autoclass_content = 'both'
-autodoc_mock_imports = ['jaxdecomp']
+autodoc_mock_imports = ['jaxdecomp', 'abacusnbody']
 
 intersphinx_mapping = {
     'python': ('https://docs.python.org/3', None),
