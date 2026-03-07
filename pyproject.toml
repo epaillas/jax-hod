@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jax-hod"
+version = "0.1.0"
+description = "JAX-based Halo Occupation Distribution for GPU-accelerated galaxy mock creation"
+requires-python = ">=3.10"
+dependencies = [
+    "jax",
+    "numpy",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["jaxhod*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
