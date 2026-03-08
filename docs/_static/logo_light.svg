@@ -1,5 +1,5 @@
 
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 240">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 250">
 <polygon points="110,20 185,65 185,155 110,200 35,155 35,65" fill="none" stroke="#d97706" stroke-width="10" stroke-linejoin="round"/>
 <circle cx="110" cy="110" r="50" fill="none" stroke="#d97706" stroke-width="6"/>
 <circle cx="110" cy="110" r="9" fill="#f59e0b"/>
@@ -8,7 +8,7 @@
 <circle cx="100" cy="135" r="5" fill="#f59e0b"/>
 <circle cx="90" cy="108" r="5" fill="#f59e0b"/>
 <circle cx="125" cy="85" r="5" fill="#f59e0b"/>
-<text x="110" y="230"
+<text x="110" y="238"
       text-anchor="middle"
       font-family="DejaVu Sans Mono, monospace"
       font-size="28"
