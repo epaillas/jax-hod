@@ -1,0 +1,19 @@
+
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+<rect width="256" height="256" fill="#ffffff"/>
+<!-- Hex badge -->
+<polygon points="128,34 206,82 206,174 128,222 50,174 50,82"
+         fill="none" stroke="#d97706" stroke-width="10" stroke-linejoin="round"/>
+<!-- Halo -->
+<circle cx="128" cy="128" r="56" fill="none" stroke="#d97706" stroke-width="6"/>
+<!-- Central galaxy -->
+<circle cx="128" cy="128" r="10" fill="#f59e0b"/>
+<!-- Satellite galaxies -->
+<g fill="#f59e0b">
+<circle cx="182" cy="124" r="5"/>
+<circle cx="156" cy="84" r="5"/>
+<circle cx="102" cy="90" r="5"/>
+<circle cx="82" cy="144" r="5"/>
+<circle cx="138" cy="176" r="5"/>
+</g>
+</svg>
