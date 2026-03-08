@@ -7,7 +7,7 @@
 ```
 
 ```{eval-rst}
-.. autofunction:: jaxhod.simulations.abacus.load_abacus_hod_halos
+.. autofunction:: jaxhod.simulations.abacus.load_abacus_subsampled_halos
 ```
 
 

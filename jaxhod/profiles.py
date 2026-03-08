@@ -16,7 +16,7 @@ def _sample_unit_vectors(key, shape):
     return jnp.stack([x, y, z], axis=-1)
 
 
-@dataclass
+@dataclass(frozen=True)
 class UniformSphere:
     """
     Place satellites uniformly within the virial sphere.
@@ -47,7 +47,7 @@ class UniformSphere:
         return directions * r[:, :, None] * radii[:, None, None]
 
 
-@dataclass
+@dataclass(frozen=True)
 class NFW:
     """
     Place satellites according to an NFW density profile.

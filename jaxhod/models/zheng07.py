@@ -4,7 +4,7 @@ import jax.numpy as jnp
 from jax.scipy.special import erf
 
 
-@dataclass
+@dataclass(frozen=True)
 class Zheng07:
     """
     Zheng et al. (2007) 5-parameter HOD model.

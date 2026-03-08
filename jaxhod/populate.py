@@ -1,6 +1,47 @@
+import functools
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+
+@functools.lru_cache(maxsize=32)
+def _get_populate_jit(max_satellites):
+    """
+    Return a JIT-compiled ``_populate`` bound to a fixed ``max_satellites``.
+
+    Results are cached so repeated calls with the same ``max_satellites``
+    return the same compiled function without retracing.
+    """
+    return jax.jit(
+        lambda pos, m, r, model, key, profile, hw:
+            _populate(pos, m, r, model, key, max_satellites, profile, hw),
+        static_argnums=(3, 5),  # model and profile are Python objects, not arrays
+    )
+
+
+def _compute_max_satellites(model, halo_masses):
+    """
+    Automatically determine ``max_satellites`` from the HOD model and halo masses.
+
+    Uses the predicted mean satellite occupation for the most massive halo and
+    adds a 5-sigma Poisson buffer so the probability of any halo exceeding the
+    cap is negligible (< 3e-7 per halo).
+
+    Parameters
+    ----------
+    model : HOD model instance
+    halo_masses : array_like, shape (N,)
+
+    Returns
+    -------
+    int
+        Suggested value for ``max_satellites``.
+    """
+    max_mass = float(np.max(halo_masses))
+    lam = float(model.mean_nsat(jnp.asarray([max_mass]))[0])
+    if lam <= 0:
+        return 1
+    return max(int(np.ceil(lam + 5.0 * np.sqrt(lam))), 1)
 
 
 def _populate(halo_positions, halo_masses, halo_radii, model, key,
@@ -67,8 +108,8 @@ def _populate(halo_positions, halo_masses, halo_radii, model, key,
     return result
 
 
-def populate(halo_positions, halo_masses, halo_radii, model, key, max_satellites=50,
-             profile=None, min_mass=None, batch_size=None, halo_weights=None):
+def populate(halo_positions, halo_masses, halo_radii, model, key, max_satellites=None,
+             profile=None, min_mass=None, batch_size=None, halo_weights=None, jit=False):
     """
     Populate dark matter halos with galaxies using the given HOD model.
 
@@ -87,10 +128,13 @@ def populate(halo_positions, halo_masses, halo_radii, model, key, max_satellites
         Must expose ``mean_ncen(masses)`` and ``mean_nsat(masses)`` methods.
     key : jax.random.PRNGKey
         JAX random key.
-    max_satellites : int
+    max_satellites : int or None, optional
         Maximum number of satellites per halo. Satellites beyond this
-        limit are silently dropped; increase if your most massive halos
-        are expected to host more than this many satellites.
+        limit are silently dropped. When ``None`` (default), the value is
+        computed automatically from ``model.mean_nsat`` evaluated at the
+        most massive halo, adding a 5-sigma Poisson safety margin to make
+        truncation negligible. Set explicitly only if you need to override
+        this (e.g. to fix shapes for JIT compilation across calls).
     profile : profile instance, optional
         Radial profile for satellite placement. Must implement
         ``sample_offsets(key, n_halos, max_satellites, radii)``.
@@ -114,7 +158,7 @@ def populate(halo_positions, halo_masses, halo_radii, model, key, max_satellites
         included in the returned dict.
 
         The primary use case is the AbacusHOD subsample (loaded by
-        ``load_abacus_hod_halos``): ``prepare_sim`` probabilistically
+        ``load_abacus_subsampled_halos``): ``prepare_sim`` probabilistically
         discards low-mass halos with probability ``p(M) < 1``, and stores
         ``multi_halos = 1 / p(M)`` for each kept halo.  Passing these as
         ``halo_weights`` lets you compute a correctly normalised galaxy
@@ -125,6 +169,13 @@ def populate(halo_positions, halo_masses, halo_radii, model, key, max_satellites
         Without weights, ``len(result['positions']) / box_volume``
         underestimates the true number density because the missing halos
         would have hosted some galaxies.
+    jit : bool, optional
+        If ``True``, JIT-compile ``_populate`` via ``jax.jit`` before running
+        each batch.  The compiled function is cached internally (keyed on
+        ``max_satellites``), so the first call pays the compilation cost and
+        all subsequent calls reuse the cached version.  Combined with
+        ``batch_size`` this gives both bounded memory and JIT speed.
+        Defaults to ``False`` for backward compatibility.
 
     Returns
     -------
@@ -137,6 +188,11 @@ def populate(halo_positions, halo_masses, halo_radii, model, key, max_satellites
             Per-galaxy importance weight inherited from the host halo.
             Sum over this array (divided by box volume) to obtain the
             correctly normalised number density.
+        ``max_satellites`` : int
+            The value of ``max_satellites`` that was used (auto-computed or
+            explicitly passed). Store this and pass it back as
+            ``max_satellites=result['max_satellites']`` on subsequent calls
+            to keep JAX array shapes fixed and avoid recompilation.
     """
     halo_masses = np.asarray(halo_masses)
     halo_positions = np.asarray(halo_positions)
@@ -152,9 +208,15 @@ def populate(halo_positions, halo_masses, halo_radii, model, key, max_satellites
         if halo_weights is not None:
             halo_weights = halo_weights[keep]
 
+    if max_satellites is None:
+        max_satellites = _compute_max_satellites(model, halo_masses)
+
     if batch_size is None:
-        return _populate_and_filter(halo_positions, halo_masses, halo_radii,
-                                    model, key, max_satellites, profile, halo_weights)
+        result = _populate_and_filter(halo_positions, halo_masses, halo_radii,
+                                      model, key, max_satellites, profile, halo_weights,
+                                      jit=jit)
+        result['max_satellites'] = max_satellites
+        return result
 
     n_halos = halo_masses.shape[0]
     all_positions = []
@@ -170,6 +232,7 @@ def populate(halo_positions, halo_masses, halo_radii, model, key, max_satellites
             halo_masses[start:end],
             halo_radii[start:end],
             model, batch_key, max_satellites, profile, batch_weights,
+            jit=jit,
         )
         all_positions.append(chunk['positions'])
         all_is_central.append(chunk['is_central'])
@@ -179,6 +242,7 @@ def populate(halo_positions, halo_masses, halo_radii, model, key, max_satellites
     result = {
         'positions': np.concatenate(all_positions, axis=0),
         'is_central': np.concatenate(all_is_central, axis=0),
+        'max_satellites': max_satellites,
     }
     if all_weights is not None:
         result['weights'] = np.concatenate(all_weights, axis=0)
@@ -252,10 +316,16 @@ def downsample_to_nbar(result, nbar_target, box_size, key):
 
 
 def _populate_and_filter(halo_positions, halo_masses, halo_radii,
-                         model, key, max_satellites, profile, halo_weights=None):
+                         model, key, max_satellites, profile, halo_weights=None,
+                         jit=False):
     """Run _populate and return only valid galaxies as NumPy arrays."""
-    result = _populate(halo_positions, halo_masses, halo_radii,
-                       model, key, max_satellites, profile, halo_weights)
+    if jit:
+        _populate_fn = _get_populate_jit(max_satellites)
+        result = _populate_fn(halo_positions, halo_masses, halo_radii,
+                              model, key, profile, halo_weights)
+    else:
+        result = _populate(halo_positions, halo_masses, halo_radii,
+                           model, key, max_satellites, profile, halo_weights)
     mask = np.asarray(result['mask'])
     out = {
         'positions': np.asarray(result['positions'])[mask],

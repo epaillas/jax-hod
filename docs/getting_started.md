@@ -154,7 +154,7 @@ Reads the complete CompaSO halo catalogue from ASDF files — all
 ~400 M halos for the base box. Straightforward, but see the memory
 discussion above before attempting this on a laptop.
 
-### HOD subsample (`load_abacus_hod_halos`)  ← recommended for HOD work
+### HOD subsample (`load_abacus_subsampled_halos`)  ← recommended for HOD work
 
 `abacusutils` ships a script, `abacusnbody.hod.prepare_sim`, that
 generates a mass-dependent probabilistic subsample of the full catalogue
@@ -183,11 +183,11 @@ particles_xcom_0_seed600_abacushod_oldfenv_new.h5
 ```python
 import jax
 from jaxhod import Zheng07, populate
-from jaxhod.simulations import load_abacus_hod_halos
+from jaxhod.simulations import load_abacus_subsampled_halos
 
 model = Zheng07(log_Mmin=13.0, sigma_logM=0.5, log_M0=13.0, log_M1=14.0, alpha=1.0)
 
-halos = load_abacus_hod_halos(
+halos = load_abacus_subsampled_halos(
     subsample_dir='/path/to/subsamples',
     sim_dir='/global/cfs/cdirs/desi/cosmosim/Abacus',
     sim_name='AbacusSummit_base_c000_ph000',
@@ -220,7 +220,7 @@ density estimates you should weight by this field.
 For ELG/QSO tracers, pass ``mt=True`` to load the multi-tracer subsample:
 
 ```python
-halos = load_abacus_hod_halos(..., mt=True)
+halos = load_abacus_subsampled_halos(..., mt=True)
 ```
 
 ### Full catalogue (`load_abacus_halos`)

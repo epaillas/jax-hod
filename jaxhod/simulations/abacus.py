@@ -8,7 +8,7 @@ Two entry points are provided:
     accurate, but requires loading the entire snapshot (tens of GB for
     AbacusSummit base).
 
-``load_abacus_hod_halos``
+``load_abacus_subsampled_halos``
     Reads the pre-generated HOD subsample produced by
     ``abacusnbody.hod.prepare_sim``.  The subsample is a small fraction of
     the full catalogue (a few percent by halo count) stored as slab-wise HDF5
@@ -181,11 +181,13 @@ def load_abacus_halos(
     return result
 
 
-def load_abacus_hod_halos(
+def load_abacus_subsampled_halos(
     subsample_dir,
     sim_dir,
-    sim_name,
+    cosmology,
+    phase,
     redshift,
+    sim_type='base',
     mt=False,
     seed=600,
     fields=None,
@@ -212,11 +214,17 @@ def load_abacus_hod_halos(
         containing ``{sim_name}/halos/``).  Used *only* to read the ASDF
         file header for ``ParticleMassHMsun`` and ``BoxSize``; no halo
         data is loaded from this path.
-    sim_name : str
-        Full simulation name, e.g. ``'AbacusSummit_base_c000_ph000'``.
+    cosmology : str
+        Cosmology tag, e.g. ``'c000'`` (Planck 2018 LCDM) or ``'c001'``.
+    phase : str
+        Phase tag, e.g. ``'ph000'``.  For secondary cosmologies that have
+        only a single phase, use ``'ph000'``.
     redshift : float
         Snapshot redshift, e.g. ``0.5``.  Must match the ``z_mock`` used
         when running ``prepare_sim``.
+    sim_type : str, optional
+        Simulation volume/resolution type.  One of ``'base'`` (default),
+        ``'small'``, ``'large'``, ``'huge'``, ``'highres'``.
     mt : bool, optional
         If ``True``, load the multi-tracer (MT) subsample files, which are
         generated when ELG or QSO tracers are enabled in ``prepare_sim``.
@@ -278,11 +286,12 @@ def load_abacus_hod_halos(
 
     Examples
     --------
-    >>> from jaxhod.simulations import load_abacus_hod_halos
-    >>> halos = load_abacus_hod_halos(
+    >>> from jaxhod.simulations import load_abacus_subsampled_halos
+    >>> halos = load_abacus_subsampled_halos(
     ...     subsample_dir='/path/to/subsamples',
     ...     sim_dir='/path/to/AbacusSummit',
-    ...     sim_name='AbacusSummit_base_c000_ph000',
+    ...     cosmology='c000',
+    ...     phase='ph000',
     ...     redshift=0.5,
     ... )
     >>> halos['positions'].shape   # (N_subsample, 3) — much smaller than full cat
@@ -301,13 +310,21 @@ def load_abacus_hod_halos(
     sim_dir       = Path(sim_dir)
     z_str         = f'z{redshift:.3f}'
 
+    sim_prefix = _SIM_TYPES.get(sim_type)
+    if sim_prefix is None:
+        raise ValueError(
+            f"Unknown sim_type '{sim_type}'. "
+            f"Valid options: {list(_SIM_TYPES)}"
+        )
+    sim_name = f'{sim_prefix}_{cosmology}_{phase}'
+
     slab_dir = subsample_dir / sim_name / z_str
 
     if not slab_dir.exists():
         raise FileNotFoundError(
             f'Subsample directory not found:\n  {slab_dir}\n'
             'Run abacusnbody.hod.prepare_sim first, or check subsample_dir, '
-            'sim_name, and redshift.'
+            'cosmology, phase, sim_type, and redshift.'
         )
 
     # ------------------------------------------------------------------
@@ -321,7 +338,7 @@ def load_abacus_hod_halos(
             f'No ASDF halo-info files found in:\n  {halo_info_dir}\n'
             'Check sim_dir and sim_name.'
         )
-    with asdf.open(str(halo_info_files[0]), lazy_load=True, copy_arrays=False) as af:
+    with asdf.open(str(halo_info_files[0]), lazy_load=True) as af:
         header = dict(af['header'])
     particle_mass = header['ParticleMassHMsun']   # Msun/h
 
