@@ -63,19 +63,21 @@ result = populate(..., profile=UniformSphere())
 
 ## Memory-efficient population of large catalogues
 
-Full N-body simulations (e.g. AbacusSummit base: ~80M halos) can exhaust GPU or
-host memory when the entire catalogue is loaded at once, because `_populate`
-allocates a `(N_halos, max_satellites, 3)` satellite-position array before any
-galaxies are drawn.
+`_populate` allocates a `(N_halos, max_satellites, 3)` satellite-position array
+before any galaxies are drawn. Measured scaling (see
+`nb/memory_scaling.py`) shows peak RSS grows at roughly **840 MB per million
+halos** (with `max_satellites=50`), plus a fixed ~1 GB JAX overhead. For
+AbacusSummit base (399 M halos) that extrapolates to **~330 GB** without any
+mitigation — far beyond any workstation.
 
-Two options can be combined to reduce peak memory:
+Two options, used together, bring this down to a tractable level:
 
-**`min_mass`** — discard halos that cannot plausibly host a galaxy before
-allocating any JAX arrays. Halos far below `log_Mmin` have negligible occupation
-probability, so they contribute nothing but memory:
+**`min_mass`** — discard halos below a mass threshold in NumPy *before* any JAX
+arrays are allocated. Halos well below `log_Mmin` have negligible occupation
+probability and contribute nothing but memory:
 
 ```python
-# Halos more than ~2 dex below log_Mmin are effectively empty
+# 2 dex below log_Mmin retains all halos with non-negligible occupation
 result = populate(
     halos['positions'], halos['masses'], halos['radii'],
     model, key,
@@ -83,17 +85,17 @@ result = populate(
 )
 ```
 
-**`batch_size`** — process the catalogue in sequential chunks so that peak
-memory scales with `batch_size × max_satellites` rather than the full catalogue.
-Each batch gets an independent derived key; results are concatenated
-automatically:
+**`batch_size`** — process the catalogue in sequential chunks so that the JAX
+peak scales with `batch_size` rather than the full catalogue. Each batch gets an
+independent derived key; results are concatenated automatically. Measured peak
+for a 1 M halo batch is **~1.8 GB**:
 
 ```python
 result = populate(
     halos['positions'], halos['masses'], halos['radii'],
     model, key,
     min_mass=10 ** (model.log_Mmin - 2),
-    batch_size=500_000,
+    batch_size=1_000_000,
 )
 ```
 
@@ -101,6 +103,22 @@ Note: because each batch uses a different derived key, a batched call produces
 statistically equivalent but not bitwise-identical results compared to an
 unbatched call with the same `key`. Results are fully reproducible across
 repeated calls given the same `key` and `batch_size`.
+
+**Input catalogue size.** Even with batched population, the input arrays
+(positions, masses, radii) for AbacusSummit base occupy ~7.4 GB as float32.
+On a 15 GB machine this leaves ~5–6 GB headroom, enough for a 1 M halo batch
+(~1.8 GB peak). If you also hold velocities in memory during population, free
+them first:
+
+```python
+halos = load_abacus_halos(..., min_mass=10 ** (model.log_Mmin - 2))
+velocities = halos.pop('velocities')   # free before population
+
+result = populate(
+    halos['positions'], halos['masses'], halos['radii'],
+    model, key, batch_size=1_000_000,
+)
+```
 
 ## JIT-compiled repeated calls
 
