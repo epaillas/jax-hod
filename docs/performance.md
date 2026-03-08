@@ -37,20 +37,25 @@ print(jax.devices())          # list all available devices
 print(jax.default_backend())  # 'cpu', 'gpu', or 'tpu'
 ```
 
-**Benchmarks** (`benchmark/device_comparison.py`) run automatically on all
-available devices and save a comparison figure.  CPU results (laptop,
-`min_mass=10^12`):
+**Benchmarks** (`benchmark/device_comparison.py`) were run on a GPU node
+(NERSC, NVIDIA GPU + `min_mass=10^12`):
 
-| N halos  | CPU no-JIT (s) | CPU JIT warm (s) | JIT speedup |
-|---------:|---------------:|-----------------:|------------:|
-|   50 000 |           0.08 |             0.04 |        1.9× |
-|  100 000 |           0.13 |             0.08 |        1.8× |
-|  250 000 |           0.37 |             0.19 |        2.0× |
-|  500 000 |           0.80 |             0.38 |        2.1× |
-|1 000 000 |           1.62 |             0.78 |        2.1× |
+| N halos  | CPU no-JIT (s) | CPU JIT warm (s) | GPU no-JIT (s) | GPU JIT warm (s) | GPU/CPU speedup |
+|---------:|---------------:|-----------------:|---------------:|-----------------:|----------------:|
+|   50 000 |           0.14 |             0.09 |           0.02 |             0.01 |            ~15× |
+|  100 000 |           0.24 |             0.17 |           0.03 |             0.02 |             ~8× |
+|  250 000 |           0.60 |             0.36 |           0.09 |             0.08 |             ~7× |
+|  500 000 |           1.16 |             0.61 |           0.16 |             0.14 |             ~7× |
+|1 000 000 |           2.45 |             1.20 |           0.31 |             0.28 |             ~8× |
 
-GPU results are not yet available from this machine; run
-`python benchmark/device_comparison.py` on a GPU node to add them.
+At 1M halos, the GPU is **7.8× faster** than CPU (no-JIT) and **4.3× faster**
+than CPU JIT warm.  The GPU's JIT speedup over its own no-JIT baseline is
+modest (~1.1–2.4×) because the GPU already saturates its compute at smaller
+catalogue sizes — the device is the bottleneck, not Python overhead.
+
+GPU compilation is slower than CPU (~2.6 s vs ~1.0 s mean), but the
+compiled binary is cached and reused across all subsequent calls, so this
+cost is paid only once per session.
 
 ## JIT-compiled repeated calls
 
