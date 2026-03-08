@@ -1,10 +1,6 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)"  srcset="docs/_static/logo_dark.svg">
-  <source media="(prefers-color-scheme: light)" srcset="docs/_static/logo_light.svg">
-  <div align="center">
-  <img alt="jax-hod logo" src="docs/_static/logo_light.svg" width="200">
-  </div>
-</picture>
+<div align="center">
+<img alt="jax-hod logo" src="docs/_static/logo_light.svg" width="200">
+</div>
 
 # JAX-HOD
 
