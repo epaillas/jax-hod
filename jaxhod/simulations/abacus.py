@@ -17,8 +17,11 @@ Two entry points are provided:
 Reference: Maksimova et al. 2021 (https://arxiv.org/abs/2110.11398)
 """
 
+from __future__ import annotations
+
 import re
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -26,24 +29,24 @@ import numpy as np
 # Simulation name templates for the AbacusSummit suite.
 # sim_type -> string prefix as used in the directory names.
 _SIM_TYPES = {
-    'base':   'AbacusSummit_base',    # 2000 Mpc/h, 6912^3 particles
-    'small':  'AbacusSummit_small',   # 500  Mpc/h, 1728^3 particles
-    'large':  'AbacusSummit_large',   # 2000 Mpc/h, 10240^3 particles (few sims)
-    'huge':   'AbacusSummit_huge',    # 7500 Mpc/h, 8640^3 particles
-    'highres':'AbacusSummit_highres', # 1000 Mpc/h, 6912^3 particles
+    'base':    'AbacusSummit_base',    # 2000 Mpc/h, 6912^3 particles
+    'small':   'AbacusSummit_small',   # 500  Mpc/h, 1728^3 particles
+    'large':   'AbacusSummit_large',   # 2000 Mpc/h, 10240^3 particles (few sims)
+    'huge':    'AbacusSummit_huge',    # 7500 Mpc/h, 8640^3 particles
+    'highres': 'AbacusSummit_highres', # 1000 Mpc/h, 6912^3 particles
 }
 
 
 def load_abacus_halos(
-    sim_dir,
-    cosmology,
-    phase,
-    redshift,
-    sim_type='base',
-    min_mass=None,
-    cleaned=True,
-    fields=None,
-):
+    sim_dir: str | Path,
+    cosmology: str,
+    phase: str,
+    redshift: float,
+    sim_type: str = 'base',
+    min_mass: float | None = None,
+    cleaned: bool = True,
+    fields: list[str] | None = None,
+) -> dict[str, Any]:
     """
     Load halo positions, masses, radii and velocities from an AbacusSummit
     simulation snapshot, ready to be passed directly to ``populate()``.
@@ -79,13 +82,13 @@ def load_abacus_halos(
     -------
     dict with keys:
 
-        ``positions``  : ndarray, shape (N, 3)
+        ``positions``  : np.ndarray, shape (N, 3), float32
             Halo centre-of-mass positions in Mpc/h (periodic box coordinates).
-        ``masses``     : ndarray, shape (N,)
+        ``masses``     : np.ndarray, shape (N,), float32
             Halo masses in Msun/h, computed as N_particles × particle_mass.
-        ``radii``      : ndarray, shape (N,)
+        ``radii``      : np.ndarray, shape (N,), float32
             Halo virial radii (r100 of the L2 subhalo) in Mpc/h.
-        ``velocities`` : ndarray, shape (N, 3)
+        ``velocities`` : np.ndarray, shape (N, 3), float32
             Halo centre-of-mass velocities in km/s.
         ``header``     : dict
             Simulation metadata from the ASDF file header, including
@@ -97,6 +100,8 @@ def load_abacus_halos(
         If ``abacusutils`` is not installed.
     FileNotFoundError
         If the expected halo catalogue path does not exist.
+    ValueError
+        If ``sim_type`` is not one of the recognised AbacusSummit variants.
 
     Examples
     --------
@@ -149,10 +154,10 @@ def load_abacus_halos(
     halos = cat.halos
     particle_mass = cat.header['ParticleMassHMsun']   # Msun/h
 
-    positions  = np.array(halos['x_L2com'],   dtype=np.float32)   # (N, 3) Mpc/h
-    velocities = np.array(halos['v_L2com'],   dtype=np.float32)   # (N, 3) km/s
-    radii      = np.array(halos['r100_L2com'],dtype=np.float32)   # (N,)   Mpc/h
-    masses     = np.array(halos['N'],         dtype=np.float32) * particle_mass  # Msun/h
+    positions  = np.array(halos['x_L2com'],    dtype=np.float32)  # (N, 3) Mpc/h
+    velocities = np.array(halos['v_L2com'],    dtype=np.float32)  # (N, 3) km/s
+    radii      = np.array(halos['r100_L2com'], dtype=np.float32)  # (N,)   Mpc/h
+    masses     = np.array(halos['N'],          dtype=np.float32) * particle_mass  # Msun/h
 
     # Apply optional mass cut.
     if min_mass is not None:
@@ -162,7 +167,7 @@ def load_abacus_halos(
         radii      = radii[mask]
         masses     = masses[mask]
 
-    result = {
+    result: dict[str, Any] = {
         'positions':  positions,
         'masses':     masses,
         'radii':      radii,
@@ -182,16 +187,16 @@ def load_abacus_halos(
 
 
 def load_abacus_subsampled_halos(
-    subsample_dir,
-    sim_dir,
-    cosmology,
-    phase,
-    redshift,
-    sim_type='base',
-    mt=False,
-    seed=600,
-    fields=None,
-):
+    subsample_dir: str | Path,
+    sim_dir: str | Path,
+    cosmology: str,
+    phase: str,
+    redshift: float,
+    sim_type: str = 'base',
+    mt: bool = False,
+    seed: int = 600,
+    fields: list[str] | None = None,
+) -> dict[str, Any]:
     """
     Load halo positions, masses, radii and velocities from an AbacusHOD
     subsample, ready to be passed directly to ``populate()``.
@@ -242,21 +247,21 @@ def load_abacus_subsampled_halos(
     -------
     dict with keys:
 
-        ``positions``  : ndarray, shape (N, 3)
+        ``positions``  : np.ndarray, shape (N, 3), float32
             Halo centre-of-mass positions in Mpc/h.
-        ``masses``     : ndarray, shape (N,)
+        ``masses``     : np.ndarray, shape (N,), float32
             Halo masses in Msun/h (= particle count × particle mass).
-        ``radii``      : ndarray, shape (N,)
+        ``radii``      : np.ndarray, shape (N,), float32
             Halo virial radii using r98 of the L2 subhalo, in Mpc/h.
             This matches what AbacusHOD uses internally.
-        ``velocities`` : ndarray, shape (N, 3)
+        ``velocities`` : np.ndarray, shape (N, 3), float32
             Halo centre-of-mass velocities in km/s.
-        ``weights``    : ndarray, shape (N,)
+        ``weights``    : np.ndarray, shape (N,), float32
             Inverse subsampling probability (``multi_halos`` field).
             High-mass halos have weight ≈ 1; low-mass halos may have
             weight > 1 because only a fraction of them were kept in the
-            subsample.  Pass these as importance weights if you need
-            unbiased number-density estimates.
+            subsample.  Pass these to ``populate()`` as ``halo_weights``
+            for unbiased number-density estimates.
         ``header``     : dict
             Simulation metadata including ``BoxSize`` (Mpc/h),
             ``ParticleMassHMsun``, ``Redshift``, etc.
@@ -268,6 +273,8 @@ def load_abacus_subsampled_halos(
         ``abacusutils``).
     FileNotFoundError
         If the subsample directory or ASDF header files are not found.
+    ValueError
+        If ``sim_type`` is not one of the recognised AbacusSummit variants.
 
     Notes
     -----
@@ -345,8 +352,8 @@ def load_abacus_subsampled_halos(
     # ------------------------------------------------------------------
     # Discover and sort slab files by their integer index.
     # ------------------------------------------------------------------
-    mt_tag    = '_MT' if mt else ''
-    glob_pat  = f'halos_xcom_*_seed{seed}_abacushod_oldfenv{mt_tag}_new.h5'
+    mt_tag   = '_MT' if mt else ''
+    glob_pat = f'halos_xcom_*_seed{seed}_abacushod_oldfenv{mt_tag}_new.h5'
     slab_files = sorted(
         slab_dir.glob(glob_pat),
         key=lambda p: int(re.search(r'halos_xcom_(\d+)_', p.name).group(1)),
@@ -363,18 +370,18 @@ def load_abacus_subsampled_halos(
     _default_fields = {'x_L2com', 'v_L2com', 'N', 'r98_L2com', 'multi_halos'}
     extra_fields = [f for f in (fields or []) if f not in _default_fields]
 
-    positions_list  = []
-    velocities_list = []
-    masses_list     = []
-    radii_list      = []
-    weights_list    = []
-    extras          = {f: [] for f in extra_fields}
+    positions_list:  list[np.ndarray] = []
+    velocities_list: list[np.ndarray] = []
+    masses_list:     list[np.ndarray] = []
+    radii_list:      list[np.ndarray] = []
+    weights_list:    list[np.ndarray] = []
+    extras:          dict[str, list[np.ndarray]] = {f: [] for f in extra_fields}
 
     for slab_path in slab_files:
         with h5py.File(slab_path, 'r') as f:
             h = f['halos']
-            positions_list.append(np.array(h['x_L2com'],   dtype=np.float32))
-            velocities_list.append(np.array(h['v_L2com'],  dtype=np.float32))
+            positions_list.append(np.array(h['x_L2com'],    dtype=np.float32))
+            velocities_list.append(np.array(h['v_L2com'],   dtype=np.float32))
             masses_list.append(
                 np.array(h['N'], dtype=np.float32) * particle_mass
             )
@@ -383,7 +390,7 @@ def load_abacus_subsampled_halos(
             for field in extra_fields:
                 extras[field].append(np.array(h[field]))
 
-    result = {
+    result: dict[str, Any] = {
         'positions':  np.concatenate(positions_list,  axis=0),
         'masses':     np.concatenate(masses_list,     axis=0),
         'radii':      np.concatenate(radii_list,      axis=0),

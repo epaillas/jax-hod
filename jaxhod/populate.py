@@ -1,16 +1,32 @@
+from __future__ import annotations
+
 import functools
+from typing import Any
+
 import jax
 import jax.numpy as jnp
+import jax.typing
 import numpy as np
 
 
 @functools.lru_cache(maxsize=32)
-def _get_populate_jit(max_satellites):
+def _get_populate_jit(max_satellites: int):
     """
     Return a JIT-compiled ``_populate`` bound to a fixed ``max_satellites``.
 
     Results are cached so repeated calls with the same ``max_satellites``
     return the same compiled function without retracing.
+
+    Parameters
+    ----------
+    max_satellites : int
+        Maximum number of satellite slots per halo.  Baked into the compiled
+        function as a static constant so JAX array shapes are fixed.
+
+    Returns
+    -------
+    Callable
+        JIT-compiled version of ``_populate`` with ``max_satellites`` fixed.
     """
     return jax.jit(
         lambda pos, m, r, model, key, profile, hw:
@@ -19,23 +35,25 @@ def _get_populate_jit(max_satellites):
     )
 
 
-def _compute_max_satellites(model, halo_masses):
+def _compute_max_satellites(model: Any, halo_masses: np.ndarray) -> int:
     """
     Automatically determine ``max_satellites`` from the HOD model and halo masses.
 
-    Uses the predicted mean satellite occupation for the most massive halo and
-    adds a 5-sigma Poisson buffer so the probability of any halo exceeding the
-    cap is negligible (< 3e-7 per halo).
+    Evaluates the predicted mean satellite occupation at the most massive halo
+    and adds a 5-sigma Poisson buffer so the probability of any single halo
+    exceeding the cap is negligible (< 3×10⁻⁷ per halo).
 
     Parameters
     ----------
     model : HOD model instance
-    halo_masses : array_like, shape (N,)
+        Must expose a ``mean_nsat(masses)`` method returning a JAX array.
+    halo_masses : np.ndarray, shape (N,)
+        Halo masses in Msun/h.
 
     Returns
     -------
     int
-        Suggested value for ``max_satellites``.
+        Suggested value for ``max_satellites``, at least 1.
     """
     max_mass = float(np.max(halo_masses))
     lam = float(model.mean_nsat(jnp.asarray([max_mass]))[0])
@@ -44,14 +62,61 @@ def _compute_max_satellites(model, halo_masses):
     return max(int(np.ceil(lam + 5.0 * np.sqrt(lam))), 1)
 
 
-def _populate(halo_positions, halo_masses, halo_radii, model, key,
-              max_satellites=50, profile=None, halo_weights=None):
+def _populate(
+    halo_positions: jax.typing.ArrayLike,
+    halo_masses: jax.typing.ArrayLike,
+    halo_radii: jax.typing.ArrayLike,
+    model: Any,
+    key: jax.Array,
+    max_satellites: int = 50,
+    profile: Any = None,
+    halo_weights: jax.typing.ArrayLike | None = None,
+) -> dict[str, jax.Array]:
     """
-    Internal JAX-native population function.
+    JAX-native HOD population kernel.
 
-    Returns fixed-size padded arrays with a boolean mask so the function
-    is fully JIT-compatible. Use ``populate()`` for a cleaner interface
-    that returns only valid galaxies.
+    Returns fixed-size padded arrays plus a boolean ``mask`` so the function
+    has static output shapes and is fully JIT-compatible.  Use ``populate()``
+    for a cleaner interface that strips the padding and returns plain NumPy
+    arrays.
+
+    Parameters
+    ----------
+    halo_positions : array_like, shape (N, 3)
+        Halo centre positions in Mpc/h.
+    halo_masses : array_like, shape (N,)
+        Halo masses in Msun/h.
+    halo_radii : array_like, shape (N,)
+        Halo virial radii in Mpc/h.
+    model : HOD model instance
+        Must expose ``mean_ncen(masses)`` and ``mean_nsat(masses)`` methods
+        returning JAX arrays.
+    key : jax.Array
+        JAX PRNG key; split internally into three independent sub-keys for
+        central draws, satellite counts, and satellite positions.
+    max_satellites : int, optional
+        Maximum satellite slots allocated per halo.  Satellites drawn beyond
+        this cap are silently discarded.  Default is 50.
+    profile : profile instance, optional
+        Radial profile used to place satellites.  Must implement
+        ``sample_offsets(key, n_halos, max_satellites, radii)``.
+        Defaults to ``NFW(concentration=5)``.
+    halo_weights : array_like, shape (N,), optional
+        Per-halo importance weights propagated to output galaxies.
+
+    Returns
+    -------
+    dict with keys:
+        ``positions`` : jax.Array, shape (N + N*max_satellites, 3)
+            Padded position array (centrals first, then satellite slots).
+        ``is_central`` : jax.Array of bool, shape (N + N*max_satellites,)
+            True for valid central slots.
+        ``mask`` : jax.Array of bool, shape (N + N*max_satellites,)
+            True for slots that hold a real galaxy.  Apply this to all
+            output arrays to obtain the unpadded catalogue.
+        ``weights`` : jax.Array, shape (N + N*max_satellites,)
+            Only present when ``halo_weights`` is not None.  Padded array of
+            per-galaxy host-halo weights.
     """
     if profile is None:
         from .profiles import NFW
@@ -91,7 +156,7 @@ def _populate(halo_positions, halo_masses, halo_radii, model, key,
     )
     all_mask = jnp.concatenate([is_central, sat_mask_flat], axis=0)
 
-    result = {
+    result: dict[str, jax.Array] = {
         'positions': all_positions,
         'is_central': all_is_central,
         'mask': all_mask,
@@ -108,8 +173,19 @@ def _populate(halo_positions, halo_masses, halo_radii, model, key,
     return result
 
 
-def populate(halo_positions, halo_masses, halo_radii, model, key, max_satellites=None,
-             profile=None, min_mass=None, batch_size=None, halo_weights=None, jit=False):
+def populate(
+    halo_positions: jax.typing.ArrayLike,
+    halo_masses: jax.typing.ArrayLike,
+    halo_radii: jax.typing.ArrayLike,
+    model: Any,
+    key: jax.Array,
+    max_satellites: int | None = None,
+    profile: Any = None,
+    min_mass: float | None = None,
+    batch_size: int | None = None,
+    halo_weights: jax.typing.ArrayLike | None = None,
+    jit: bool = False,
+) -> dict[str, Any]:
     """
     Populate dark matter halos with galaxies using the given HOD model.
 
@@ -119,80 +195,84 @@ def populate(halo_positions, halo_masses, halo_radii, model, key, max_satellites
     Parameters
     ----------
     halo_positions : array_like, shape (N, 3)
-        Halo centre positions.
+        Halo centre positions in Mpc/h.
     halo_masses : array_like, shape (N,)
         Halo masses in Msun/h.
     halo_radii : array_like, shape (N,)
-        Halo virial radii in the same units as halo_positions.
+        Halo virial radii in the same units as ``halo_positions``.
     model : HOD model instance
-        Must expose ``mean_ncen(masses)`` and ``mean_nsat(masses)`` methods.
-    key : jax.random.PRNGKey
-        JAX random key.
-    max_satellites : int or None, optional
-        Maximum number of satellites per halo. Satellites beyond this
-        limit are silently dropped. When ``None`` (default), the value is
+        Must expose ``mean_ncen(masses)`` and ``mean_nsat(masses)`` methods
+        returning JAX arrays.  ``Zheng07`` satisfies this interface.
+    key : jax.Array
+        JAX PRNG key.
+    max_satellites : int, optional
+        Maximum number of satellites per halo.  Satellites beyond this
+        limit are silently dropped.  When ``None`` (default), the value is
         computed automatically from ``model.mean_nsat`` evaluated at the
         most massive halo, adding a 5-sigma Poisson safety margin to make
-        truncation negligible. Set explicitly only if you need to override
-        this (e.g. to fix shapes for JIT compilation across calls).
+        truncation negligible.  Set explicitly to keep JAX array shapes
+        fixed across calls and avoid recompilation.
     profile : profile instance, optional
-        Radial profile for satellite placement. Must implement
-        ``sample_offsets(key, n_halos, max_satellites, radii)``.
+        Radial profile for satellite placement.  Must implement
+        ``sample_offsets(key, n_halos, max_satellites, radii) -> array``.
         Defaults to ``NFW(concentration=5)``.
     min_mass : float, optional
-        Minimum halo mass in Msun/h. Halos below this threshold are
-        discarded before any JAX arrays are allocated, reducing peak
-        memory use. A good choice is ``10 ** (model.log_Mmin - 2)``,
-        which keeps all halos with non-negligible central occupation
-        while cutting the tail that contributes nothing.
+        Minimum halo mass in Msun/h.  Halos below this threshold are
+        discarded in NumPy *before* any JAX arrays are allocated, reducing
+        peak memory.  A good default is ``10 ** (model.log_Mmin - 2)``.
     batch_size : int, optional
-        Number of halos to process at once. When set, halos are split
-        into chunks of this size and processed sequentially, so peak
-        memory scales with ``batch_size`` rather than the full catalogue
-        size. Each batch receives an independent random key derived from
-        ``key``. Results are concatenated and are equivalent to a single
-        unbatched call with the same ``key``.
+        Number of halos to process per batch.  When set, halos are split
+        into sequential chunks of this size so peak JAX memory scales with
+        ``batch_size`` rather than the full catalogue.  Each batch receives
+        an independent key derived from ``key`` via ``jax.random.fold_in``.
+        Results are concatenated and are statistically equivalent (though
+        not bitwise-identical) to an unbatched call with the same ``key``.
     halo_weights : array_like, shape (N,), optional
-        Per-halo importance weights. When provided, each output galaxy
-        receives the weight of its host halo, and a ``weights`` array is
-        included in the returned dict.
+        Per-halo importance weights.  When provided, each output galaxy
+        inherits the weight of its host halo and a ``weights`` key is added
+        to the returned dict.
 
-        The primary use case is the AbacusHOD subsample (loaded by
-        ``load_abacus_subsampled_halos``): ``prepare_sim`` probabilistically
-        discards low-mass halos with probability ``p(M) < 1``, and stores
+        The primary use case is the AbacusHOD subsample from
+        ``load_abacus_subsampled_halos``: ``prepare_sim`` stores
         ``multi_halos = 1 / p(M)`` for each kept halo.  Passing these as
-        ``halo_weights`` lets you compute a correctly normalised galaxy
-        number density::
+        ``halo_weights`` yields a correctly normalised galaxy number density::
 
-            n_gal = result['weights'].sum() / box_volume
+            nbar = result['weights'].sum() / box_volume
 
-        Without weights, ``len(result['positions']) / box_volume``
-        underestimates the true number density because the missing halos
-        would have hosted some galaxies.
     jit : bool, optional
-        If ``True``, JIT-compile ``_populate`` via ``jax.jit`` before running
-        each batch.  The compiled function is cached internally (keyed on
-        ``max_satellites``), so the first call pays the compilation cost and
-        all subsequent calls reuse the cached version.  Combined with
-        ``batch_size`` this gives both bounded memory and JIT speed.
-        Defaults to ``False`` for backward compatibility.
+        If ``True``, JIT-compile ``_populate`` via ``jax.jit`` before each
+        batch.  The compiled function is cached internally (keyed on
+        ``max_satellites``), so the first call pays the compilation cost
+        (~0.4–2.6 s depending on hardware) and all subsequent calls reuse
+        the cached XLA binary.  On CPU, warm JIT is ~2× faster than
+        no-JIT; on GPU, device parallelism dominates and the JIT benefit
+        is smaller (~1.1–2.4×).  Default is ``False``.
 
     Returns
     -------
     dict with keys:
-        ``positions`` : array, shape (N_gal, 3)
-            Positions of all galaxies.
-        ``is_central`` : bool array, shape (N_gal,)
+        ``positions`` : np.ndarray, shape (N_gal, 3)
+            Positions of all galaxies (centrals and satellites).
+        ``is_central`` : np.ndarray of bool, shape (N_gal,)
             True for central galaxies, False for satellites.
-        ``weights`` : array, shape (N_gal,), only if ``halo_weights`` was given
-            Per-galaxy importance weight inherited from the host halo.
-            Sum over this array (divided by box volume) to obtain the
-            correctly normalised number density.
+        ``weights`` : np.ndarray, shape (N_gal,)
+            Per-galaxy host-halo importance weight.  Only present when
+            ``halo_weights`` was supplied.
         ``max_satellites`` : int
-            The value of ``max_satellites`` that was used (auto-computed or
-            explicitly passed). Store this and pass it back as
+            The ``max_satellites`` value used.  Store and pass back as
             ``max_satellites=result['max_satellites']`` on subsequent calls
-            to keep JAX array shapes fixed and avoid recompilation.
+            to keep shapes fixed and avoid JIT recompilation.
+
+    Examples
+    --------
+    >>> import jax
+    >>> from jaxhod import Zheng07, populate
+    >>> model = Zheng07(log_Mmin=13.0, sigma_logM=0.5,
+    ...                 log_M0=13.0, log_M1=14.0, alpha=1.0)
+    >>> result = populate(halo_positions, halo_masses, halo_radii,
+    ...                   model, jax.random.PRNGKey(0))
+    >>> result['positions'].shape   # (N_gal, 3)
+    >>> result['is_central'].sum()  # number of central galaxies
     """
     halo_masses = np.asarray(halo_masses)
     halo_positions = np.asarray(halo_positions)
@@ -207,6 +287,16 @@ def populate(halo_positions, halo_masses, halo_radii, model, key, max_satellites
         halo_radii = halo_radii[keep]
         if halo_weights is not None:
             halo_weights = halo_weights[keep]
+
+    if len(halo_masses) == 0:
+        result: dict[str, Any] = {
+            'positions': np.empty((0, 3), dtype=np.float32),
+            'is_central': np.empty((0,), dtype=bool),
+            'max_satellites': max_satellites if max_satellites is not None else 1,
+        }
+        if halo_weights is not None:
+            result['weights'] = np.empty((0,), dtype=np.float32)
+        return result
 
     if max_satellites is None:
         max_satellites = _compute_max_satellites(model, halo_masses)
@@ -249,7 +339,12 @@ def populate(halo_positions, halo_masses, halo_radii, model, key, max_satellites
     return result
 
 
-def downsample_to_nbar(result, nbar_target, box_size, key):
+def downsample_to_nbar(
+    result: dict[str, Any],
+    nbar_target: float,
+    box_size: float,
+    key: jax.Array,
+) -> dict[str, Any]:
     """
     Randomly downsample a galaxy catalogue to match a target number density.
 
@@ -262,16 +357,16 @@ def downsample_to_nbar(result, nbar_target, box_size, key):
     ----------
     result : dict
         Output from ``populate()``.  Must contain ``'positions'`` and
-        ``'is_central'``.  If ``'weights'`` is present they are used to
-        compute the true number density, and the downsampled output also
+        ``'is_central'``.  If ``'weights'`` is present, it is used to
+        compute the true number density; the downsampled output also
         contains ``'weights'``.
     nbar_target : float
-        Target number density in (Mpc/h)\ :sup:`-3`, e.g. ``1e-4`` for BOSS
+        Target number density in (Mpc/h) :sup:`-3`, e.g. ``1e-4`` for BOSS
         CMASS-like samples.
     box_size : float
         Side length of the (cubic) simulation box in Mpc/h.
-    key : jax.random.PRNGKey
-        Random key used to draw the keep/discard mask.
+    key : jax.Array
+        JAX PRNG key used to draw the keep/discard mask.
 
     Returns
     -------
@@ -291,7 +386,7 @@ def downsample_to_nbar(result, nbar_target, box_size, key):
     >>> thin = downsample_to_nbar(result, nbar_target=1e-4,
     ...                           box_size=halos['header']['BoxSize'],
     ...                           key=jax.random.PRNGKey(1))
-    >>> thin['positions'].shape[0] / halos['header']['BoxSize']**3
+    >>> thin['positions'].shape[0] / halos['header']['BoxSize'] ** 3
     # ≈ 1e-4
     """
     volume = box_size ** 3
@@ -312,13 +407,45 @@ def downsample_to_nbar(result, nbar_target, box_size, key):
     n_gal = len(result['positions'])
     keep = np.asarray(jax.random.bernoulli(key, p=f_keep, shape=(n_gal,)))
 
-    return {k: v[keep] for k, v in result.items()}
+    # Only index array-valued keys; pass scalars (e.g. max_satellites) through.
+    return {k: (v[keep] if isinstance(v, np.ndarray) else v)
+            for k, v in result.items()}
 
 
-def _populate_and_filter(halo_positions, halo_masses, halo_radii,
-                         model, key, max_satellites, profile, halo_weights=None,
-                         jit=False):
-    """Run _populate and return only valid galaxies as NumPy arrays."""
+def _populate_and_filter(
+    halo_positions: np.ndarray,
+    halo_masses: np.ndarray,
+    halo_radii: np.ndarray,
+    model: Any,
+    key: jax.Array,
+    max_satellites: int,
+    profile: Any,
+    halo_weights: np.ndarray | None = None,
+    jit: bool = False,
+) -> dict[str, np.ndarray]:
+    """
+    Run ``_populate`` and return only valid galaxies as NumPy arrays.
+
+    Dispatches to the JIT-cached function when ``jit=True``, strips the
+    padding mask, and transfers results to the host.
+
+    Parameters
+    ----------
+    halo_positions : np.ndarray, shape (N, 3)
+    halo_masses : np.ndarray, shape (N,)
+    halo_radii : np.ndarray, shape (N,)
+    model : HOD model instance
+    key : jax.Array
+    max_satellites : int
+    profile : profile instance or None
+    halo_weights : np.ndarray, shape (N,), optional
+    jit : bool, optional
+
+    Returns
+    -------
+    dict with keys ``positions``, ``is_central``, and optionally ``weights``,
+    each a NumPy array containing only the valid (unpadded) galaxies.
+    """
     if jit:
         _populate_fn = _get_populate_jit(max_satellites)
         result = _populate_fn(halo_positions, halo_masses, halo_radii,
@@ -327,7 +454,7 @@ def _populate_and_filter(halo_positions, halo_masses, halo_radii,
         result = _populate(halo_positions, halo_masses, halo_radii,
                            model, key, max_satellites, profile, halo_weights)
     mask = np.asarray(result['mask'])
-    out = {
+    out: dict[str, np.ndarray] = {
         'positions': np.asarray(result['positions'])[mask],
         'is_central': np.asarray(result['is_central'])[mask],
     }

@@ -69,7 +69,7 @@ class TestPopulate:
     def test_output_keys(self, model, halos):
         positions, masses, radii = halos
         result = populate(positions, masses, radii, model, jax.random.PRNGKey(1))
-        assert set(result.keys()) == {'positions', 'is_central'}
+        assert set(result.keys()) == {'positions', 'is_central', 'max_satellites'}
 
     def test_output_shapes_consistent(self, model, halos):
         positions, masses, radii = halos

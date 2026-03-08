@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 
+import jax
 import jax.numpy as jnp
+import jax.typing
 from jax.scipy.special import erf
 
 
@@ -24,6 +26,10 @@ class Zheng07:
         Log10 of the characteristic satellite mass [Msun/h].
     alpha : float
         Power-law slope of the satellite mean occupation.
+
+    References
+    ----------
+    Zheng et al. 2007, ApJ, 667, 760. https://doi.org/10.1086/521074
     """
 
     log_Mmin: float
@@ -32,11 +38,16 @@ class Zheng07:
     log_M1: float
     alpha: float
 
-    def mean_ncen(self, masses):
+    def mean_ncen(self, masses: jax.typing.ArrayLike) -> jax.Array:
         """
         Mean number of central galaxies per halo.
 
-        N_cen(M) = 0.5 * [1 + erf((log10(M) - log_Mmin) / sigma_logM)]
+        .. math::
+
+            \\langle N_\\mathrm{cen} \\rangle(M) = \\frac{1}{2}
+            \\left[1 + \\mathrm{erf}\\!
+            \\left(\\frac{\\log_{10}M - \\log_{10}M_\\mathrm{min}}
+            {\\sigma_{\\log M}}\\right)\\right]
 
         Parameters
         ----------
@@ -45,17 +56,22 @@ class Zheng07:
 
         Returns
         -------
-        array, shape (N,)
+        jax.Array, shape (N,)
             Mean central occupation, in [0, 1].
         """
         log_mass = jnp.log10(masses)
         return 0.5 * (1.0 + erf((log_mass - self.log_Mmin) / self.sigma_logM))
 
-    def mean_nsat(self, masses):
+    def mean_nsat(self, masses: jax.typing.ArrayLike) -> jax.Array:
         """
         Mean number of satellite galaxies per halo.
 
-        N_sat(M) = N_cen(M) * ((M - M0) / M1)^alpha  for M > M0, else 0
+        .. math::
+
+            \\langle N_\\mathrm{sat} \\rangle(M) =
+            \\langle N_\\mathrm{cen} \\rangle(M)
+            \\left(\\frac{M - M_0}{M_1}\\right)^\\alpha
+            \\quad (M > M_0)
 
         Parameters
         ----------
@@ -64,7 +80,7 @@ class Zheng07:
 
         Returns
         -------
-        array, shape (N,)
+        jax.Array, shape (N,)
             Mean satellite occupation, >= 0.
         """
         M0 = 10.0 ** self.log_M0
