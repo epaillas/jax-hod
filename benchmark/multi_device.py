@@ -1,22 +1,106 @@
 """
 Benchmark: multi-device parallel populate() vs sequential.
 
-Compares sequential (1 device) vs parallel (N devices) batched population
-for N = 1, 2, 4 where enough devices are available.  On CPU-only machines
-the same physical CPU is listed multiple times to exercise the threading
-path and provide a baseline; GPU runs show true parallel speedup.
+Compares sequential (1 device) vs parallel (N devices) batched population.
+Accepts CLI flags so it can be run as-is on Perlmutter CPU nodes (128 cores)
+and GPU nodes (4 x A100).
 
-Run from the repo root:
-
+Basic usage
+-----------
+    # Auto-detect backend, default sizes
     python benchmark/multi_device.py
 
-Produces:
-  - A summary table printed to stdout
-  - benchmark/multi_device.png
+Perlmutter CPU node (128 cores)
+--------------------------------
+    python benchmark/multi_device.py \\
+        --backend cpu \\
+        --cpu-devices 128 \\
+        --device-counts 1 2 4 8 16 32 64 128 \\
+        --n-halos 2_000_000 \\
+        --batch-size 100_000
+
+    # The --cpu-devices flag sets XLA_FLAGS before JAX initialises, which is
+    # the only supported way to expose multiple CPU devices to JAX.
+
+Perlmutter GPU node (4 x A100)
+--------------------------------
+    python benchmark/multi_device.py \\
+        --backend gpu \\
+        --device-counts 1 2 4 \\
+        --n-halos 4_000_000 \\
+        --batch-size 1_000_000
+
+Output
+------
+  - Summary table to stdout
+  - benchmark/multi_device.png  (or --output PATH)
 """
 
+from __future__ import annotations
+
+import argparse
 import os
 import sys
+
+# ---------------------------------------------------------------------------
+# Parse args BEFORE importing JAX so we can set XLA_FLAGS in time.
+# ---------------------------------------------------------------------------
+
+def _parse_args():
+    p = argparse.ArgumentParser(
+        description='Multi-device populate() benchmark',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument(
+        '--backend', choices=['cpu', 'gpu', 'tpu'], default=None,
+        help='JAX backend to use. Default: gpu if available, else cpu.',
+    )
+    p.add_argument(
+        '--cpu-devices', type=int, default=1, metavar='N',
+        help='Number of CPU devices to expose via XLA_FLAGS. '
+             'Set to 128 on Perlmutter CPU nodes. '
+             'Ignored when --backend gpu/tpu.',
+    )
+    p.add_argument(
+        '--device-counts', type=int, nargs='+', default=None, metavar='N',
+        help='Device counts to benchmark, e.g. 1 2 4. '
+             'Default: all powers of 2 up to the number of available devices.',
+    )
+    p.add_argument(
+        '--n-halos', type=lambda s: int(s.replace('_', '')),
+        default=500_000, metavar='N',
+        help='Total number of synthetic halos.',
+    )
+    p.add_argument(
+        '--batch-size', type=lambda s: int(s.replace('_', '')),
+        default=100_000, metavar='N',
+        help='Halos per batch passed to populate().',
+    )
+    p.add_argument(
+        '--n-repeat', type=int, default=3, metavar='N',
+        help='Timing repetitions per configuration (median is reported).',
+    )
+    p.add_argument(
+        '--output', default=None, metavar='PATH',
+        help='Output figure path. Default: benchmark/multi_device.png.',
+    )
+    return p.parse_args()
+
+
+args = _parse_args()
+
+# Must happen before `import jax`.
+if args.cpu_devices > 1:
+    flag = f'--xla_force_host_platform_device_count={args.cpu_devices}'
+    existing = os.environ.get('XLA_FLAGS', '')
+    # Avoid duplicating the flag if the user already set it.
+    if '--xla_force_host_platform_device_count' not in existing:
+        os.environ['XLA_FLAGS'] = f'{existing} {flag}'.strip()
+
+# ---------------------------------------------------------------------------
+# Remaining imports (after XLA_FLAGS is set)
+# ---------------------------------------------------------------------------
+
 import time
 
 import jax
@@ -30,7 +114,7 @@ from jaxhod.populate import _compute_max_satellites
 
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Model / configuration
 # ---------------------------------------------------------------------------
 
 MODEL = Zheng07(
@@ -40,11 +124,8 @@ MODEL = Zheng07(
     log_M1=14.0,
     alpha=1.0,
 )
-MIN_MASS     = 10 ** (MODEL.log_Mmin - 1)
-N_HALOS      = 500_000
-BATCH_SIZE   = 100_000
-N_REPEAT     = 3
-RNG          = np.random.default_rng(42)
+MIN_MASS = 10 ** (MODEL.log_Mmin - 1)
+RNG      = np.random.default_rng(42)
 
 
 # ---------------------------------------------------------------------------
@@ -58,17 +139,17 @@ def _make_halos(n, box=500.0):
     return pos, mass, rad
 
 
-def _bench(pos, mass, rad, max_sat, key, devices_list, n_repeat=N_REPEAT):
+def _bench(pos, mass, rad, max_sat, key, devices_list, batch_size, n_repeat):
     """Return median wall time (s) for populate() with the given devices list."""
     times = []
     for rep in range(n_repeat + 1):  # +1 warm-up
         t0 = time.perf_counter()
         populate(pos, mass, rad, MODEL, jax.random.fold_in(key, rep),
                  max_satellites=max_sat, min_mass=MIN_MASS,
-                 batch_size=BATCH_SIZE, devices=devices_list, jit=True)
+                 batch_size=batch_size, devices=devices_list, jit=True)
         jax.effects_barrier()
         elapsed = time.perf_counter() - t0
-        if rep > 0:  # skip warm-up
+        if rep > 0:
             times.append(elapsed)
     return float(np.median(times))
 
@@ -77,34 +158,69 @@ def _bench(pos, mass, rad, max_sat, key, devices_list, n_repeat=N_REPEAT):
 # Discover devices
 # ---------------------------------------------------------------------------
 
-gpus = get_devices('gpu')
-is_cpu_fallback = gpus[0].platform == 'cpu'
+backend = args.backend
+if backend is None:
+    # Auto-detect: prefer GPU, fall back to CPU.
+    try:
+        jax.devices('gpu')
+        backend = 'gpu'
+    except RuntimeError:
+        backend = 'cpu'
 
-if is_cpu_fallback:
-    print("NOTE: No GPU detected — using CPU devices for all slots.\n"
-          "      Results show threading overhead, not true multi-GPU speedup.\n")
-    # Repeat the single CPU device to exercise the parallel code path.
-    physical = gpus[0]
-    device_counts = [1, 2, 4]
-    device_lists  = {n: [physical] * n for n in device_counts}
-    label_prefix  = 'CPU'
+all_devices = get_devices(backend)
+is_cpu = all_devices[0].platform == 'cpu'
+
+if is_cpu and args.cpu_devices > 1 and len(all_devices) < args.cpu_devices:
+    print(f"WARNING: requested --cpu-devices {args.cpu_devices} but JAX only "
+          f"sees {len(all_devices)} CPU devices.\n"
+          f"         Ensure XLA_FLAGS was set before JAX initialised "
+          f"(this script sets it automatically).\n")
+
+print(f"JAX version  : {jax.__version__}")
+print(f"Backend      : {backend}")
+print(f"Devices      : {all_devices}")
+if is_cpu:
+    print("NOTE: CPU backend — device counts simulate thread-level parallelism,\n"
+          "      not independent physical accelerators.")
+print()
+
+# ---------------------------------------------------------------------------
+# Resolve device-count list
+# ---------------------------------------------------------------------------
+
+n_available = len(all_devices)
+
+if args.device_counts is not None:
+    device_counts = sorted(set(args.device_counts))
+    invalid = [n for n in device_counts if n > n_available]
+    if invalid:
+        print(f"WARNING: requested device counts {invalid} exceed available "
+              f"devices ({n_available}); they will be skipped.")
+        device_counts = [n for n in device_counts if n <= n_available]
 else:
-    print(f"GPUs found: {gpus}\n")
-    device_counts = sorted({1, 2, min(4, len(gpus))})
-    device_lists  = {n: gpus[:n] for n in device_counts}
-    label_prefix  = 'GPU'
+    # Default: powers of 2 up to n_available, always include 1.
+    device_counts = sorted({1} | {2**k for k in range(1, 10) if 2**k <= n_available})
 
-print(f"JAX version : {jax.__version__}")
-print(f"N_halos     : {N_HALOS:,}")
-print(f"batch_size  : {BATCH_SIZE:,}")
-print(f"N_repeat    : {N_REPEAT}\n")
+# Build device lists: for GPU use distinct devices; for CPU repeat the same
+# physical device (JAX only has one CPU device regardless of core count, but
+# the ThreadPoolExecutor still exercises true thread-level parallelism).
+if is_cpu:
+    physical = all_devices[0]
+    device_lists = {n: [physical] * n for n in device_counts}
+else:
+    device_lists = {n: all_devices[:n] for n in device_counts}
 
+print(f"N_halos      : {args.n_halos:,}")
+print(f"batch_size   : {args.batch_size:,}")
+print(f"N_repeat     : {args.n_repeat}")
+print(f"Device counts: {device_counts}")
+print()
 
 # ---------------------------------------------------------------------------
 # Run benchmarks
 # ---------------------------------------------------------------------------
 
-pos, mass, rad = _make_halos(N_HALOS)
+pos, mass, rad = _make_halos(args.n_halos)
 keep    = mass >= MIN_MASS
 max_sat = _compute_max_satellites(MODEL, mass[keep])
 key     = jax.random.PRNGKey(0)
@@ -112,11 +228,13 @@ key     = jax.random.PRNGKey(0)
 print(f"{'N devices':>10}  {'Median (s)':>11}  {'Speedup vs 1':>13}  {'vs ideal':>9}")
 print("-" * 50)
 
-rows = []
-t_seq = None
+rows   = []
+t_seq  = None
+label_prefix = 'CPU' if is_cpu else backend.upper()
+
 for n_dev in device_counts:
     devs  = device_lists[n_dev]
-    t_med = _bench(pos, mass, rad, max_sat, key, devs)
+    t_med = _bench(pos, mass, rad, max_sat, key, devs, args.batch_size, args.n_repeat)
     if t_seq is None:
         t_seq = t_med
     speedup = t_seq / t_med
@@ -127,7 +245,6 @@ for n_dev in device_counts:
 
 print()
 
-
 # ---------------------------------------------------------------------------
 # Figure
 # ---------------------------------------------------------------------------
@@ -135,16 +252,17 @@ print()
 fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
 xs      = [r['n_dev']   for r in rows]
+t_meds  = [r['t_med']   for r in rows]
 speedup = [r['speedup'] for r in rows]
 ideal   = [r['ideal']   for r in rows]
 
 # Left: wall time
 ax = axes[0]
-ax.plot(xs, [r['t_med'] for r in rows], 'o-', color='steelblue',
-        label=f'{label_prefix} parallel', lw=2)
+ax.plot(xs, t_meds, 'o-', color='steelblue', label=f'{label_prefix} parallel', lw=2)
 ax.set_xlabel('Number of devices')
 ax.set_ylabel('Median wall time (s)')
-ax.set_title(f'populate() wall time\n({N_HALOS//1000}k halos, batch={BATCH_SIZE//1000}k)')
+ax.set_title(f'populate() wall time\n'
+             f'({args.n_halos//1000}k halos, batch={args.batch_size//1000}k, {backend})')
 ax.set_xticks(xs)
 ax.grid(True, ls='--', alpha=0.4)
 ax.legend()
@@ -165,6 +283,6 @@ ax.grid(True, ls='--', alpha=0.4)
 ax.legend()
 
 fig.tight_layout()
-out = os.path.join(os.path.dirname(__file__), 'multi_device.png')
+out = args.output or os.path.join(os.path.dirname(__file__), 'multi_device.png')
 fig.savefig(out, dpi=150)
 print(f"Figure saved to {out}")
