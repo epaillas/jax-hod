@@ -251,10 +251,13 @@ print()
 
 fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-xs      = [r['n_dev']   for r in rows]
-t_meds  = [r['t_med']   for r in rows]
-speedup = [r['speedup'] for r in rows]
-ideal   = [r['ideal']   for r in rows]
+xs         = [r['n_dev']             for r in rows]
+t_meds     = [r['t_med']             for r in rows]
+speedup    = [r['speedup']           for r in rows]
+efficiency = [r['speedup'] / r['ideal'] * 100 for r in rows]
+
+# x-axis tick labels: use log scale when the range spans more than one decade
+use_log_x = (max(xs) / max(min(xs), 1)) >= 16
 
 # Left: wall time
 ax = axes[0]
@@ -263,22 +266,34 @@ ax.set_xlabel('Number of devices')
 ax.set_ylabel('Median wall time (s)')
 ax.set_title(f'populate() wall time\n'
              f'({args.n_halos//1000}k halos, batch={args.batch_size//1000}k, {backend})')
-ax.set_xticks(xs)
+if use_log_x:
+    ax.set_xscale('log', base=2)
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: str(int(v))))
+else:
+    ax.set_xticks(xs)
 ax.grid(True, ls='--', alpha=0.4)
 ax.legend()
 
-# Right: speedup vs ideal
+# Right: parallel efficiency (speedup / N × 100%)
+# This stays in [0, 100%] regardless of device count, avoiding the scale
+# problem that crushes the actual-speedup curve when ideal reaches 128×.
 ax = axes[1]
-ax.plot(xs, speedup, 'o-', color='steelblue', label='actual', lw=2)
-ax.plot(xs, ideal,   's--', color='gray',      label='ideal linear', lw=1.5)
-for x, y in zip(xs, speedup):
-    ax.annotate(f'{y:.2f}×', xy=(x, y), xytext=(0, 8),
+ax.plot(xs, efficiency, 'o-', color='steelblue', lw=2)
+ax.axhline(100, color='gray', ls='--', lw=1.5, label='ideal (100%)')
+for x, y in zip(xs, efficiency):
+    va = 'bottom' if y < 90 else 'top'
+    offset = 6 if va == 'bottom' else -6
+    ax.annotate(f'{y:.0f}%', xy=(x, y), xytext=(0, offset),
                 textcoords='offset points', ha='center', fontsize=9)
 ax.set_xlabel('Number of devices')
-ax.set_ylabel('Speedup vs 1 device')
-ax.set_title('Actual vs ideal-linear speedup')
-ax.set_xticks(xs)
-ax.set_ylim(bottom=0)
+ax.set_ylabel('Parallel efficiency  (speedup / N × 100%)')
+ax.set_title('Parallel efficiency')
+if use_log_x:
+    ax.set_xscale('log', base=2)
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: str(int(v))))
+else:
+    ax.set_xticks(xs)
+ax.set_ylim(0, 110)
 ax.grid(True, ls='--', alpha=0.4)
 ax.legend()
 
