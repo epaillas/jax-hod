@@ -2,6 +2,8 @@
 
 JAX-based Halo Occupation Distribution (HOD) framework for GPU-accelerated galaxy mock creation.
 
+**Documentation:** https://jax-hod.readthedocs.io
+
 ## Design goals
 
 - **GPU-native**: all computation runs on JAX, JIT-compilable end-to-end.
@@ -52,6 +54,16 @@ gal_is_central = result['is_central']
 
 ## Running tests
 
+The test suite uses [pytest](https://pytest.org). Install the test dependencies first:
+
 ```bash
-pytest
+pip install -e .[test]
+```
+
+Then run:
+
+```bash
+pytest               # all tests
+pytest tests/test_zheng07.py::TestPopulate  # one class
+pytest tests/test_zheng07.py::TestPopulate::test_nonzero_galaxies  # one test
 ```
