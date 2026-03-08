@@ -13,6 +13,8 @@ JAX-based Halo Occupation Distribution (HOD) framework for GPU-accelerated galax
 
 installation
 getting_started
+abacus
+performance
 ```
 
 ```{toctree}
