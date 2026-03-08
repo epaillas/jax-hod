@@ -196,6 +196,7 @@ def load_abacus_subsampled_halos(
     mt: bool = False,
     seed: int = 600,
     fields: list[str] | None = None,
+    load_particles: bool = False,
 ) -> dict[str, Any]:
     """
     Load halo positions, masses, radii and velocities from an AbacusHOD
@@ -242,6 +243,11 @@ def load_abacus_subsampled_halos(
         dict.  Available fields beyond the defaults are: ``'r25_L2com'``,
         ``'r90_L2com'``, ``'sigmav3d_L2com'``, ``'deltac_rank'``,
         ``'fenv_rank'``, ``'shear_rank'``, ``'randoms'``.
+    load_particles : bool, optional
+        If ``True``, also load the subsampled dark matter particle positions
+        from the matching ``particles_xcom_*`` HDF5 files.  Adds
+        ``'particle_positions'`` and ``'particle_halo_indices'`` to the
+        returned dict.  Default: ``False``.
 
     Returns
     -------
@@ -265,6 +271,12 @@ def load_abacus_subsampled_halos(
         ``header``     : dict
             Simulation metadata including ``BoxSize`` (Mpc/h),
             ``ParticleMassHMsun``, ``Redshift``, etc.
+        ``particle_positions`` : np.ndarray, shape (N_particles, 3), float32
+            Absolute box coordinates of subsampled dark matter particles in
+            Mpc/h.  Only present when ``load_particles=True``.
+        ``particle_halo_indices`` : np.ndarray, shape (N_particles,), int32
+            Index into the halos array for each particle.  Only present when
+            ``load_particles=True``.
 
     Raises
     ------
@@ -281,9 +293,12 @@ def load_abacus_subsampled_halos(
     The subsample files are named::
 
         halos_xcom_{i}_seed{seed}_abacushod_oldfenv[_MT]_new.h5
+        particles_xcom_{i}_seed{seed}_abacushod_oldfenv[_MT]_new.h5
 
     where ``i`` is the slab index (0, 1, 2, …).  Multiple slabs are read
-    and concatenated automatically.
+    and concatenated automatically.  The particle files live in the same
+    directory as the halo files and follow the identical naming pattern
+    with ``particles_`` prefix.
 
     Because low-mass halos are probabilistically downsampled, the subsample
     is not a complete catalogue below the HOD threshold.  When passing the
@@ -375,6 +390,7 @@ def load_abacus_subsampled_halos(
     masses_list:     list[np.ndarray] = []
     radii_list:      list[np.ndarray] = []
     weights_list:    list[np.ndarray] = []
+    halo_ids_list:   list[np.ndarray] = []
     extras:          dict[str, list[np.ndarray]] = {f: [] for f in extra_fields}
 
     for slab_path in slab_files:
@@ -387,6 +403,8 @@ def load_abacus_subsampled_halos(
             )
             radii_list.append(np.array(h['r98_L2com'],    dtype=np.float32))
             weights_list.append(np.array(h['multi_halos'], dtype=np.float32))
+            if load_particles:
+                halo_ids_list.append(np.array(h['id'], dtype=np.int64))
             for field in extra_fields:
                 extras[field].append(np.array(h[field]))
 
@@ -400,5 +418,44 @@ def load_abacus_subsampled_halos(
     }
     for field in extra_fields:
         result[field] = np.concatenate(extras[field], axis=0)
+
+    # ------------------------------------------------------------------
+    # Optionally load subsampled particle positions.
+    # ------------------------------------------------------------------
+    if load_particles:
+        halo_ids = np.concatenate(halo_ids_list, axis=0)   # (N_halos,)
+
+        part_glob = f'particles_xcom_*_seed{seed}_abacushod_oldfenv{mt_tag}_new.h5'
+        part_files = sorted(
+            slab_dir.glob(part_glob),
+            key=lambda p: int(re.search(r'particles_xcom_(\d+)_', p.name).group(1)),
+        )
+        if not part_files:
+            raise FileNotFoundError(
+                f'No particle files matching\n  {part_glob}\nfound in\n  {slab_dir}\n'
+                f'Check mt={mt} and seed={seed}.'
+            )
+
+        part_pos_list:  list[np.ndarray] = []
+        part_hid_list:  list[np.ndarray] = []
+        for pf in part_files:
+            with h5py.File(pf, 'r') as f:
+                p = f['particles']
+                part_pos_list.append(np.array(p['pos'],     dtype=np.float32))
+                part_hid_list.append(np.array(p['halo_id'], dtype=np.int64))
+
+        particle_positions = np.concatenate(part_pos_list, axis=0)   # (N_p, 3)
+        particle_halo_ids  = np.concatenate(part_hid_list, axis=0)   # (N_p,)
+
+        # Map each particle's halo_id to its index in the halos array.
+        sort_order        = np.argsort(halo_ids)
+        sorted_halo_ids   = halo_ids[sort_order]
+        # searchsorted gives positions in sorted_halo_ids; map back to original indices
+        particle_halo_indices = sort_order[
+            np.searchsorted(sorted_halo_ids, particle_halo_ids)
+        ].astype(np.int32)
+
+        result['particle_positions']    = particle_positions
+        result['particle_halo_indices'] = particle_halo_indices
 
     return result

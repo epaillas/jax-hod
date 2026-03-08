@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaxhod import Zheng07, populate, downsample_to_nbar, NFW, UniformSphere, get_devices
+from jaxhod import Zheng07, populate, downsample_to_nbar, NFW, UniformSphere, SubsampledParticles, get_devices
 from jaxhod.populate import _populate
 
 
@@ -333,6 +333,132 @@ class TestPopulateParallel:
         devs = get_devices('tpu')
         assert len(devs) > 0
         assert all(d.platform in ('cpu', 'tpu') for d in devs)
+
+
+class TestSubsampledParticles:
+    """Tests for SubsampledParticles profile using synthetic data."""
+
+    @pytest.fixture
+    def synthetic_data(self):
+        """Create a small synthetic halo + particle catalogue."""
+        rng = np.random.default_rng(42)
+        n_halos = 20
+        halo_positions = rng.uniform(0, 1000, (n_halos, 3)).astype(np.float32)
+
+        # Assign 0–5 particles to each halo
+        particles_per_halo = rng.integers(0, 6, size=n_halos)
+        # Give at least one halo zero particles (for fallback test)
+        particles_per_halo[5] = 0
+
+        halo_indices = np.repeat(np.arange(n_halos), particles_per_halo)
+        n_particles  = len(halo_indices)
+        # Place particles near their host halos
+        particle_positions = (
+            halo_positions[halo_indices]
+            + rng.uniform(-0.5, 0.5, (n_particles, 3)).astype(np.float32)
+        )
+        return halo_positions, particle_positions, halo_indices, particles_per_halo
+
+    def test_from_flat_arrays_output_shape(self, synthetic_data):
+        halo_pos, part_pos, halo_idx, pperhalo = synthetic_data
+        profile = SubsampledParticles.from_flat_arrays(halo_pos, part_pos, halo_idx)
+        n_halos = len(halo_pos)
+        max_p   = int(pperhalo.max())
+        assert profile.particle_offsets.shape == (n_halos, max_p, 3)
+        assert profile.n_particles.shape == (n_halos,)
+        assert profile.n_particles.sum() == len(halo_idx)
+
+    def test_from_flat_arrays_offsets_correct(self, synthetic_data):
+        halo_pos, part_pos, halo_idx, pperhalo = synthetic_data
+        profile = SubsampledParticles.from_flat_arrays(halo_pos, part_pos, halo_idx)
+        # For each halo, the stored offsets should match part_pos - halo_pos
+        for h in range(len(halo_pos)):
+            n_p = profile.n_particles[h]
+            if n_p == 0:
+                continue
+            stored  = profile.particle_offsets[h, :n_p]
+            # Collect actual offsets for this halo
+            mask    = halo_idx == h
+            actual  = part_pos[mask] - halo_pos[h]
+            # Sets must match (order may differ after stable sort)
+            assert stored.shape == actual.shape
+            # Sort both by first coordinate to compare
+            stored_s = stored[np.argsort(stored[:, 0])]
+            actual_s = actual[np.argsort(actual[:, 0])]
+            np.testing.assert_allclose(stored_s, actual_s, atol=1e-5)
+
+    def test_sample_offsets_shape(self, synthetic_data):
+        halo_pos, part_pos, halo_idx, _ = synthetic_data
+        profile = SubsampledParticles.from_flat_arrays(halo_pos, part_pos, halo_idx)
+        n_halos      = len(halo_pos)
+        max_sat      = 8
+        radii        = np.ones(n_halos, dtype=np.float32)
+        offsets = profile.sample_offsets(
+            jax.random.PRNGKey(0), n_halos, max_sat, radii
+        )
+        assert offsets.shape == (n_halos, max_sat, 3)
+
+    def test_sample_offsets_within_bounds(self, synthetic_data):
+        halo_pos, part_pos, halo_idx, pperhalo = synthetic_data
+        profile = SubsampledParticles.from_flat_arrays(halo_pos, part_pos, halo_idx)
+        n_halos = len(halo_pos)
+        radii   = np.ones(n_halos, dtype=np.float32)
+        offsets = np.array(profile.sample_offsets(
+            jax.random.PRNGKey(1), n_halos, 50, radii
+        ))
+        # For halos with particles, every returned offset must be one of the
+        # stored offsets (sampled with replacement, so values must match).
+        for h in range(n_halos):
+            n_p = profile.n_particles[h]
+            if n_p == 0:
+                continue
+            valid_offsets = profile.particle_offsets[h, :n_p]   # (n_p, 3)
+            for sat_offset in offsets[h]:
+                dists = np.linalg.norm(valid_offsets - sat_offset, axis=-1)
+                assert dists.min() < 1e-4, (
+                    f"Satellite offset {sat_offset} for halo {h} not found "
+                    f"in stored particle offsets"
+                )
+
+    def test_fallback_for_empty_halos(self, synthetic_data):
+        halo_pos, part_pos, halo_idx, _ = synthetic_data
+        profile = SubsampledParticles.from_flat_arrays(halo_pos, part_pos, halo_idx)
+        # Halo 5 has 0 particles; its offsets should come from UniformSphere
+        n_halos = len(halo_pos)
+        radii   = np.ones(n_halos, dtype=np.float32) * 5.0  # large so offsets are non-zero
+        offsets = np.array(profile.sample_offsets(
+            jax.random.PRNGKey(2), n_halos, 10, radii
+        ))
+        # Non-zero because UniformSphere produces random offsets
+        assert np.any(offsets[5] != 0.0)
+
+    def test_populate_with_subsampled_particles(self, synthetic_data):
+        halo_pos, part_pos, halo_idx, _ = synthetic_data
+        model = Zheng07(
+            log_Mmin=13.0, sigma_logM=0.5,
+            log_M0=13.0, log_M1=14.0, alpha=1.0,
+        )
+        profile = SubsampledParticles.from_flat_arrays(halo_pos, part_pos, halo_idx)
+        n_halos = len(halo_pos)
+        masses  = np.full(n_halos, 1e14, dtype=np.float32)
+        radii   = np.ones(n_halos, dtype=np.float32)
+        result  = populate(
+            halo_pos, masses, radii, model, jax.random.PRNGKey(3),
+            profile=profile,
+        )
+        assert 'positions' in result
+        assert 'is_central' in result
+        n_gal = result['positions'].shape[0]
+        assert result['positions'].shape == (n_gal, 3)
+        assert result['is_central'].shape == (n_gal,)
+        assert n_gal > 0
+
+    def test_hashable_for_jit(self, synthetic_data):
+        halo_pos, part_pos, halo_idx, _ = synthetic_data
+        profile = SubsampledParticles.from_flat_arrays(halo_pos, part_pos, halo_idx)
+        # Must not raise
+        h = hash(profile)
+        assert isinstance(h, int)
 
 
 class TestPopulateInternal:

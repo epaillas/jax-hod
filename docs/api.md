@@ -44,3 +44,8 @@
 .. autoclass:: jaxhod.UniformSphere
    :members:
 ```
+
+```{eval-rst}
+.. autoclass:: jaxhod.SubsampledParticles
+   :members:
+```

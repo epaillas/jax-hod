@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 import jax.typing
+import numpy as np
 
 
 def _sample_unit_vectors(
@@ -186,3 +187,119 @@ class NFW:
 
         directions = _sample_unit_vectors(k2, (n_halos, max_satellites))
         return directions * r_over_rvir[:, :, None] * radii[:, None, None]
+
+
+@dataclass
+class SubsampledParticles:
+    """
+    Place satellites at the positions of subsampled dark matter particles.
+
+    Satellites are drawn with replacement from the per-halo particle pool,
+    so each satellite position is an actual simulation particle position.
+    Halos with no subsampled particles fall back to UniformSphere.
+
+    Build with :meth:`from_flat_arrays` rather than constructing directly.
+
+    Parameters
+    ----------
+    particle_offsets : np.ndarray, shape (n_halos, max_particles_per_halo, 3)
+        Padded array of particle position offsets from each halo centre.
+    n_particles : np.ndarray, shape (n_halos,)
+        Number of valid particles per halo (values beyond this in the padded
+        axis are zeros and should be ignored).
+    """
+
+    particle_offsets: np.ndarray  # (n_halos, max_particles_per_halo, 3) float32
+    n_particles: np.ndarray       # (n_halos,) int32
+
+    def __hash__(self):
+        return id(self)
+
+    def __eq__(self, other):
+        return self is other
+
+    @classmethod
+    def from_flat_arrays(
+        cls,
+        halo_positions: np.ndarray,
+        particle_positions: np.ndarray,
+        particle_halo_indices: np.ndarray,
+    ) -> 'SubsampledParticles':
+        """
+        Organise flat particle arrays into a padded per-halo offset array.
+
+        Parameters
+        ----------
+        halo_positions : np.ndarray, shape (n_halos, 3)
+            Halo centre-of-mass positions.
+        particle_positions : np.ndarray, shape (N_particles, 3)
+            Absolute positions of all subsampled particles.
+        particle_halo_indices : np.ndarray, shape (N_particles,)
+            Integer index into the halos array for each particle.
+
+        Returns
+        -------
+        SubsampledParticles
+        """
+        n_halos = len(halo_positions)
+
+        n_particles = np.bincount(particle_halo_indices, minlength=n_halos).astype(np.int32)
+        max_p = int(n_particles.max()) if n_particles.max() > 0 else 1
+
+        offsets = np.zeros((n_halos, max_p, 3), dtype=np.float32)
+
+        order = np.argsort(particle_halo_indices, kind='stable')
+        sorted_hids = particle_halo_indices[order]
+        sorted_pos  = particle_positions[order]
+
+        # For each particle, compute the flat column index within its halo's slot
+        halo_starts = np.searchsorted(sorted_hids, np.arange(n_halos))
+        # local slot index: for particle at position k in sorted order,
+        # its slot = k - halo_starts[sorted_hids[k]]
+        flat_row = sorted_hids                                           # (N_particles,)
+        flat_col = np.arange(len(sorted_hids)) - halo_starts[sorted_hids]  # (N_particles,)
+        offsets[flat_row, flat_col] = sorted_pos - halo_positions[flat_row]
+
+        return cls(particle_offsets=offsets, n_particles=n_particles)
+
+    def sample_offsets(
+        self,
+        key: jax.Array,
+        n_halos: int,
+        max_satellites: int,
+        radii: jax.typing.ArrayLike,
+    ) -> jax.Array:
+        """
+        Sample satellite position offsets from the particle pool.
+
+        Parameters
+        ----------
+        key : jax.Array
+            JAX PRNG key.
+        n_halos : int
+            Number of halos.
+        max_satellites : int
+            Number of satellite slots per halo (fixed for JIT compatibility).
+        radii : array_like, shape (n_halos,)
+            Virial radius of each halo (used only for the UniformSphere fallback).
+
+        Returns
+        -------
+        jax.Array, shape (n_halos, max_satellites, 3)
+            Position offsets from halo centres.
+        """
+        max_p = self.particle_offsets.shape[1]
+        n_p = jnp.asarray(self.n_particles)          # (n_halos,)
+        n_p_safe = jnp.maximum(n_p, 1)               # avoid div-by-zero in index
+
+        floats = jax.random.uniform(key, (n_halos, max_satellites))
+        idx = jnp.floor(floats * n_p_safe[:, None]).astype(jnp.int32)
+        idx = jnp.clip(idx, 0, max_p - 1)
+
+        particle_offsets_jax = jnp.asarray(self.particle_offsets)
+        offsets = particle_offsets_jax[jnp.arange(n_halos)[:, None], idx]
+
+        # Fallback to UniformSphere for halos with 0 particles
+        fallback = UniformSphere().sample_offsets(key, n_halos, max_satellites, radii)
+        has_particles = (n_p > 0)[:, None, None]     # (n_halos, 1, 1)
+        return jnp.where(has_particles, offsets, fallback)
