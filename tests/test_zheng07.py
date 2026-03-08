@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaxhod import Zheng07, populate, NFW, UniformSphere
+from jaxhod import Zheng07, populate, downsample_to_nbar, NFW, UniformSphere
 from jaxhod.populate import _populate
 
 
@@ -207,6 +207,57 @@ class TestPopulate:
         result = populate(positions, masses, radii, model, jax.random.PRNGKey(8),
                           profile=NFW(concentration=concentrations))
         assert result['positions'].shape[0] > 0
+
+
+class TestDownsampleToNbar:
+    BOX_SIZE = 1000.0  # Mpc/h — same as the halos fixture
+
+    def _full_result(self, model, halos):
+        positions, masses, radii = halos
+        return populate(positions, masses, radii, model, jax.random.PRNGKey(50))
+
+    def test_output_keys_preserved(self, model, halos):
+        result = self._full_result(model, halos)
+        thin = downsample_to_nbar(result, nbar_target=1e-6,
+                                  box_size=self.BOX_SIZE, key=jax.random.PRNGKey(0))
+        assert set(thin.keys()) == set(result.keys())
+
+    def test_fewer_galaxies_after_downsample(self, model, halos):
+        result = self._full_result(model, halos)
+        thin = downsample_to_nbar(result, nbar_target=1e-6,
+                                  box_size=self.BOX_SIZE, key=jax.random.PRNGKey(0))
+        assert thin['positions'].shape[0] < result['positions'].shape[0]
+
+    def test_nbar_approximately_correct(self, model, halos):
+        result = self._full_result(model, halos)
+        nbar_target = 1e-6
+        thin = downsample_to_nbar(result, nbar_target=nbar_target,
+                                  box_size=self.BOX_SIZE, key=jax.random.PRNGKey(0))
+        nbar_thin = thin['positions'].shape[0] / self.BOX_SIZE ** 3
+        # Poisson noise: allow 10% relative tolerance at this galaxy count
+        assert abs(nbar_thin - nbar_target) / nbar_target < 0.10
+
+    def test_weights_used_for_nbar_when_present(self, model, halos):
+        # Inflate weights by 10x — the true nbar should also be 10x higher,
+        # so a larger fraction must be discarded to hit the same target.
+        positions, masses, radii = halos
+        w = np.full(len(masses), 10.0, dtype=np.float32)
+        result = populate(positions, masses, radii, model, jax.random.PRNGKey(51),
+                          halo_weights=w)
+        result_no_w = populate(positions, masses, radii, model, jax.random.PRNGKey(51))
+        thin_w  = downsample_to_nbar(result,      nbar_target=1e-6,
+                                     box_size=self.BOX_SIZE, key=jax.random.PRNGKey(0))
+        thin_nw = downsample_to_nbar(result_no_w, nbar_target=1e-6,
+                                     box_size=self.BOX_SIZE, key=jax.random.PRNGKey(0))
+        # With weight=10, far fewer galaxies should survive
+        assert thin_w['positions'].shape[0] < thin_nw['positions'].shape[0]
+
+    def test_nbar_above_mock_raises(self, model, halos):
+        result = self._full_result(model, halos)
+        nbar_mock = result['positions'].shape[0] / self.BOX_SIZE ** 3
+        with pytest.raises(ValueError, match='Cannot upsample'):
+            downsample_to_nbar(result, nbar_target=nbar_mock * 10,
+                               box_size=self.BOX_SIZE, key=jax.random.PRNGKey(0))
 
 
 class TestPopulateInternal:

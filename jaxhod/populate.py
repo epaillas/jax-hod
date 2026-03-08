@@ -185,6 +185,72 @@ def populate(halo_positions, halo_masses, halo_radii, model, key, max_satellites
     return result
 
 
+def downsample_to_nbar(result, nbar_target, box_size, key):
+    """
+    Randomly downsample a galaxy catalogue to match a target number density.
+
+    The true number density of the mock is estimated from ``result['weights']``
+    if present (as returned by ``populate(..., halo_weights=...)``), or from
+    the raw galaxy count otherwise.  Each galaxy is then kept independently
+    with probability ``nbar_target / nbar_mock``.
+
+    Parameters
+    ----------
+    result : dict
+        Output from ``populate()``.  Must contain ``'positions'`` and
+        ``'is_central'``.  If ``'weights'`` is present they are used to
+        compute the true number density, and the downsampled output also
+        contains ``'weights'``.
+    nbar_target : float
+        Target number density in (Mpc/h)\ :sup:`-3`, e.g. ``1e-4`` for BOSS
+        CMASS-like samples.
+    box_size : float
+        Side length of the (cubic) simulation box in Mpc/h.
+    key : jax.random.PRNGKey
+        Random key used to draw the keep/discard mask.
+
+    Returns
+    -------
+    dict
+        Same keys as ``result``, filtered to the surviving galaxies.
+
+    Raises
+    ------
+    ValueError
+        If ``nbar_target`` exceeds the mock number density — downsampling
+        cannot increase the number of galaxies.
+
+    Examples
+    --------
+    >>> result = populate(halos['positions'], halos['masses'], halos['radii'],
+    ...                   model, key, halo_weights=halos['weights'])
+    >>> thin = downsample_to_nbar(result, nbar_target=1e-4,
+    ...                           box_size=halos['header']['BoxSize'],
+    ...                           key=jax.random.PRNGKey(1))
+    >>> thin['positions'].shape[0] / halos['header']['BoxSize']**3
+    # ≈ 1e-4
+    """
+    volume = box_size ** 3
+
+    if 'weights' in result:
+        nbar_mock = float(result['weights'].sum()) / volume
+    else:
+        nbar_mock = len(result['positions']) / volume
+
+    f_keep = nbar_target / nbar_mock
+
+    if f_keep > 1.0:
+        raise ValueError(
+            f'nbar_target ({nbar_target:.3e}) exceeds the mock number density '
+            f'({nbar_mock:.3e}). Cannot upsample.'
+        )
+
+    n_gal = len(result['positions'])
+    keep = np.asarray(jax.random.bernoulli(key, p=f_keep, shape=(n_gal,)))
+
+    return {k: v[keep] for k, v in result.items()}
+
+
 def _populate_and_filter(halo_positions, halo_masses, halo_radii,
                          model, key, max_satellites, profile, halo_weights=None):
     """Run _populate and return only valid galaxies as NumPy arrays."""
