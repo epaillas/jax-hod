@@ -3,6 +3,7 @@
   <source media="(prefers-color-scheme: light)" srcset="docs/_static/logo_light.svg">
   <img alt="jax-hod logo" src="docs/_static/logo_light.svg" width="120">
 </picture>
+
 # jax-hod
 
 JAX-based Halo Occupation Distribution (HOD) framework for GPU-accelerated galaxy mock creation.
