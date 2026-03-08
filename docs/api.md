@@ -22,6 +22,10 @@
 .. autofunction:: jaxhod.populate._populate
 ```
 
+```{eval-rst}
+.. autofunction:: jaxhod.populate.get_devices
+```
+
 ## HOD models
 
 ```{eval-rst}

@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaxhod import Zheng07, populate, downsample_to_nbar, NFW, UniformSphere
+from jaxhod import Zheng07, populate, downsample_to_nbar, NFW, UniformSphere, get_devices
 from jaxhod.populate import _populate
 
 
@@ -258,6 +258,81 @@ class TestDownsampleToNbar:
         with pytest.raises(ValueError, match='Cannot upsample'):
             downsample_to_nbar(result, nbar_target=nbar_mock * 10,
                                box_size=self.BOX_SIZE, key=jax.random.PRNGKey(0))
+
+
+class TestPopulateParallel:
+    """Tests for the devices= parallel path in populate()."""
+
+    def test_devices_requires_batch_size(self, model, halos):
+        positions, masses, radii = halos
+        cpu = jax.devices('cpu')
+        with pytest.raises(ValueError, match='batch_size'):
+            populate(positions, masses, radii, model, jax.random.PRNGKey(60),
+                     devices=cpu)
+
+    def test_single_device_list_matches_sequential(self, model, halos):
+        positions, masses, radii = halos
+        key = jax.random.PRNGKey(61)
+        cpu = [jax.devices('cpu')[0]]
+        result_seq = populate(positions, masses, radii, model, key,
+                              batch_size=100)
+        result_par = populate(positions, masses, radii, model, key,
+                              batch_size=100, devices=cpu)
+        np.testing.assert_array_equal(result_seq['positions'], result_par['positions'])
+        np.testing.assert_array_equal(result_seq['is_central'], result_par['is_central'])
+
+    def test_parallel_output_keys(self, model, halos):
+        positions, masses, radii = halos
+        cpu = jax.devices('cpu')
+        devices = [cpu[0], cpu[0]]
+        result = populate(positions, masses, radii, model, jax.random.PRNGKey(62),
+                          batch_size=100, devices=devices)
+        assert 'positions' in result
+        assert 'is_central' in result
+        assert 'max_satellites' in result
+
+    def test_parallel_shapes_consistent(self, model, halos):
+        positions, masses, radii = halos
+        cpu = jax.devices('cpu')
+        devices = [cpu[0], cpu[0]]
+        result = populate(positions, masses, radii, model, jax.random.PRNGKey(63),
+                          batch_size=100, devices=devices)
+        n_gal = result['positions'].shape[0]
+        assert result['positions'].shape == (n_gal, 3)
+        assert result['is_central'].shape == (n_gal,)
+
+    def test_parallel_nonzero_galaxies(self, model, halos):
+        positions, masses, radii = halos
+        cpu = jax.devices('cpu')
+        devices = [cpu[0], cpu[0]]
+        result = populate(positions, masses, radii, model, jax.random.PRNGKey(64),
+                          batch_size=100, devices=devices)
+        assert result['positions'].shape[0] > 0
+
+    def test_parallel_with_weights(self, model, halos):
+        positions, masses, radii = halos
+        weights = np.ones(len(masses), dtype=np.float32) * 2.0
+        cpu = jax.devices('cpu')
+        devices = [cpu[0], cpu[0]]
+        result = populate(positions, masses, radii, model, jax.random.PRNGKey(65),
+                          batch_size=100, devices=devices, halo_weights=weights)
+        assert 'weights' in result
+        assert result['weights'].shape == (result['positions'].shape[0],)
+
+    def test_parallel_with_min_mass(self, model, halos):
+        positions, masses, radii = halos
+        cpu = jax.devices('cpu')
+        devices = [cpu[0], cpu[0]]
+        result = populate(positions, masses, radii, model, jax.random.PRNGKey(66),
+                          batch_size=100, devices=devices,
+                          min_mass=10 ** model.log_Mmin)
+        assert result['positions'].shape[0] >= 0
+
+    def test_get_devices_fallback(self):
+        # On a CPU-only machine, get_devices('tpu') should return CPU devices.
+        devs = get_devices('tpu')
+        assert len(devs) > 0
+        assert all(d.platform in ('cpu', 'tpu') for d in devs)
 
 
 class TestPopulateInternal:

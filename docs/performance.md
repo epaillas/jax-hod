@@ -57,6 +57,37 @@ GPU compilation is slower than CPU (~2.6 s vs ~1.0 s mean), but the
 compiled binary is cached and reused across all subsequent calls, so this
 cost is paid only once per session.
 
+## Multi-device parallelism
+
+When multiple GPUs (or CPU cores) are available, `populate()` can distribute
+batches across them in parallel using the `devices` parameter:
+
+```python
+from jaxhod import populate, get_devices
+
+gpus = get_devices('gpu')   # e.g. [GPU:0, GPU:1, GPU:2, GPU:3]
+result = populate(
+    halo_positions, halo_masses, halo_radii, model, key,
+    batch_size=1_000_000,
+    devices=gpus,
+    jit=True,
+)
+```
+
+Batches are assigned to devices in round-robin order. Each device processes
+one batch at a time using a `ThreadPoolExecutor` bounded to `len(devices)`
+threads. `jax.default_device()` is thread-local, so device routing is safe.
+
+**Memory**: each GPU uses ~1.8 GB peak per `batch_size=1M` batch. With 4 GPUs
+running concurrently, total device memory is ~7.2 GB (1.8 GB per GPU).
+
+**Reproducibility**: same `key`, `batch_size`, and `devices` length always
+produces the same output — each batch's key is derived from its index via
+`jax.random.fold_in`, independent of thread scheduling order.
+
+`devices=` requires `batch_size` to be set. Use `get_devices('gpu')` to
+obtain all available GPUs, falling back to CPU if none are present.
+
 ## JIT-compiled repeated calls
 
 Pass `jit=True` to `populate()` to enable JAX JIT compilation. The compiled

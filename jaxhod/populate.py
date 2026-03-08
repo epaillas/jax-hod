@@ -1,12 +1,34 @@
 from __future__ import annotations
 
 import functools
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import jax
 import jax.numpy as jnp
 import jax.typing
 import numpy as np
+
+
+def get_devices(backend: str = 'gpu') -> list[jax.Device]:
+    """Return all JAX devices of the given backend, falling back to CPU.
+
+    Parameters
+    ----------
+    backend : str, optional
+        JAX backend name: ``'gpu'``, ``'cpu'``, or ``'tpu'``.
+        Default is ``'gpu'``.
+
+    Returns
+    -------
+    list[jax.Device]
+        All devices of the requested backend.  If the backend is not
+        available (e.g. no GPU present), falls back to all CPU devices.
+    """
+    try:
+        return jax.devices(backend)
+    except RuntimeError:
+        return jax.devices('cpu')
 
 
 @functools.lru_cache(maxsize=32)
@@ -185,6 +207,7 @@ def populate(
     batch_size: int | None = None,
     halo_weights: jax.typing.ArrayLike | None = None,
     jit: bool = False,
+    devices: list[jax.Device] | None = None,
 ) -> dict[str, Any]:
     """
     Populate dark matter halos with galaxies using the given HOD model.
@@ -247,6 +270,13 @@ def populate(
         the cached XLA binary.  On CPU, warm JIT is ~2× faster than
         no-JIT; on GPU, device parallelism dominates and the JIT benefit
         is smaller (~1.1–2.4×).  Default is ``False``.
+    devices : list[jax.Device], optional
+        List of JAX devices to use for parallel batch processing.  When
+        provided, batches are dispatched to devices in round-robin order
+        using a ``ThreadPoolExecutor``.  Requires ``batch_size`` to be
+        set.  Use ``get_devices('gpu')`` to obtain all available GPUs.
+        When ``None`` (default), batches are processed sequentially on
+        the current default device.
 
     Returns
     -------
@@ -301,6 +331,9 @@ def populate(
     if max_satellites is None:
         max_satellites = _compute_max_satellites(model, halo_masses)
 
+    if devices is not None and batch_size is None:
+        raise ValueError("devices= requires batch_size to be set.")
+
     if batch_size is None:
         result = _populate_and_filter(halo_positions, halo_masses, halo_radii,
                                       model, key, max_satellites, profile, halo_weights,
@@ -309,11 +342,50 @@ def populate(
         return result
 
     n_halos = halo_masses.shape[0]
+    batch_starts = list(range(0, n_halos, batch_size))
+
+    if devices is not None and len(devices) > 1:
+        n_devices = len(devices)
+
+        def _run_batch(i, start):
+            end = min(start + batch_size, n_halos)
+            device = devices[i % n_devices]
+            batch_key = jax.random.fold_in(key, i)
+            batch_weights = halo_weights[start:end] if halo_weights is not None else None
+            with jax.default_device(device):
+                chunk = _populate_and_filter(
+                    halo_positions[start:end],
+                    halo_masses[start:end],
+                    halo_radii[start:end],
+                    model, batch_key, max_satellites, profile, batch_weights,
+                    jit=jit,
+                )
+                jax.effects_barrier()
+            return chunk
+
+        ordered = [None] * len(batch_starts)
+        with ThreadPoolExecutor(max_workers=n_devices) as pool:
+            futures = {pool.submit(_run_batch, i, s): i
+                       for i, s in enumerate(batch_starts)}
+            for f in futures:
+                ordered[futures[f]] = f.result()
+
+        all_positions  = [c['positions']   for c in ordered]
+        all_is_central = [c['is_central']  for c in ordered]
+        result = {
+            'positions':      np.concatenate(all_positions,  axis=0),
+            'is_central':     np.concatenate(all_is_central, axis=0),
+            'max_satellites': max_satellites,
+        }
+        if halo_weights is not None:
+            result['weights'] = np.concatenate([c['weights'] for c in ordered], axis=0)
+        return result
+
     all_positions = []
     all_is_central = []
     all_weights = [] if halo_weights is not None else None
 
-    for i, start in enumerate(range(0, n_halos, batch_size)):
+    for i, start in enumerate(batch_starts):
         end = min(start + batch_size, n_halos)
         batch_key = jax.random.fold_in(key, i)
         batch_weights = halo_weights[start:end] if halo_weights is not None else None
