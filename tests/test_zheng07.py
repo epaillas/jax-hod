@@ -158,6 +158,48 @@ class TestPopulate:
         assert result['is_central'].shape == (n_gal,)
         assert n_gal > 0
 
+    def test_halo_weights_present_in_output(self, model, halos):
+        positions, masses, radii = halos
+        weights = np.ones(len(masses), dtype=np.float32) * 2.0
+        result = populate(positions, masses, radii, model, jax.random.PRNGKey(40),
+                          halo_weights=weights)
+        assert 'weights' in result
+        assert result['weights'].shape == (result['positions'].shape[0],)
+
+    def test_halo_weights_absent_without_arg(self, model, halos):
+        positions, masses, radii = halos
+        result = populate(positions, masses, radii, model, jax.random.PRNGKey(41))
+        assert 'weights' not in result
+
+    def test_halo_weights_values_match_host(self, model, halos):
+        # Each galaxy's weight must equal the weight of its host halo.
+        # Use uniform weights so we can verify the round-trip.
+        positions, masses, radii = halos
+        n = len(masses)
+        rng = np.random.default_rng(0)
+        weights = rng.uniform(1.0, 5.0, n).astype(np.float32)
+        result = populate(positions, masses, radii, model, jax.random.PRNGKey(42),
+                          halo_weights=weights)
+        # Every galaxy weight must appear in the input weights array.
+        for w in result['weights']:
+            assert np.any(np.isclose(weights, w))
+
+    def test_halo_weights_with_batching(self, model, halos):
+        positions, masses, radii = halos
+        weights = np.ones(len(masses), dtype=np.float32)
+        result = populate(positions, masses, radii, model, jax.random.PRNGKey(43),
+                          halo_weights=weights, batch_size=100)
+        assert 'weights' in result
+        assert result['weights'].shape == (result['positions'].shape[0],)
+
+    def test_halo_weights_with_min_mass(self, model, halos):
+        positions, masses, radii = halos
+        weights = np.ones(len(masses), dtype=np.float32) * 3.0
+        result = populate(positions, masses, radii, model, jax.random.PRNGKey(44),
+                          halo_weights=weights, min_mass=10 ** model.log_Mmin)
+        assert 'weights' in result
+        assert np.all(result['weights'] == 3.0)
+
     def test_nfw_per_halo_concentration(self, model, halos):
         positions, masses, radii = halos
         n = masses.shape[0]

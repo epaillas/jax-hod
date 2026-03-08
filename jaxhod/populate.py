@@ -3,7 +3,8 @@ import jax.numpy as jnp
 import numpy as np
 
 
-def _populate(halo_positions, halo_masses, halo_radii, model, key, max_satellites=50, profile=None):
+def _populate(halo_positions, halo_masses, halo_radii, model, key,
+              max_satellites=50, profile=None, halo_weights=None):
     """
     Internal JAX-native population function.
 
@@ -49,15 +50,25 @@ def _populate(halo_positions, halo_masses, halo_radii, model, key, max_satellite
     )
     all_mask = jnp.concatenate([is_central, sat_mask_flat], axis=0)
 
-    return {
+    result = {
         'positions': all_positions,
         'is_central': all_is_central,
         'mask': all_mask,
     }
 
+    # Each galaxy (central or satellite) inherits the weight of its host halo.
+    # Centrals: one slot per halo, weight = halo_weights.
+    # Satellites: max_satellites slots per halo, each repeated max_satellites times.
+    if halo_weights is not None:
+        halo_weights = jnp.asarray(halo_weights)
+        sat_weights_flat = jnp.repeat(halo_weights, max_satellites)
+        result['weights'] = jnp.concatenate([halo_weights, sat_weights_flat], axis=0)
+
+    return result
+
 
 def populate(halo_positions, halo_masses, halo_radii, model, key, max_satellites=50,
-             profile=None, min_mass=None, batch_size=None):
+             profile=None, min_mass=None, batch_size=None, halo_weights=None):
     """
     Populate dark matter halos with galaxies using the given HOD model.
 
@@ -97,6 +108,23 @@ def populate(halo_positions, halo_masses, halo_radii, model, key, max_satellites
         size. Each batch receives an independent random key derived from
         ``key``. Results are concatenated and are equivalent to a single
         unbatched call with the same ``key``.
+    halo_weights : array_like, shape (N,), optional
+        Per-halo importance weights. When provided, each output galaxy
+        receives the weight of its host halo, and a ``weights`` array is
+        included in the returned dict.
+
+        The primary use case is the AbacusHOD subsample (loaded by
+        ``load_abacus_hod_halos``): ``prepare_sim`` probabilistically
+        discards low-mass halos with probability ``p(M) < 1``, and stores
+        ``multi_halos = 1 / p(M)`` for each kept halo.  Passing these as
+        ``halo_weights`` lets you compute a correctly normalised galaxy
+        number density::
+
+            n_gal = result['weights'].sum() / box_volume
+
+        Without weights, ``len(result['positions']) / box_volume``
+        underestimates the true number density because the missing halos
+        would have hosted some galaxies.
 
     Returns
     -------
@@ -105,49 +133,68 @@ def populate(halo_positions, halo_masses, halo_radii, model, key, max_satellites
             Positions of all galaxies.
         ``is_central`` : bool array, shape (N_gal,)
             True for central galaxies, False for satellites.
+        ``weights`` : array, shape (N_gal,), only if ``halo_weights`` was given
+            Per-galaxy importance weight inherited from the host halo.
+            Sum over this array (divided by box volume) to obtain the
+            correctly normalised number density.
     """
     halo_masses = np.asarray(halo_masses)
     halo_positions = np.asarray(halo_positions)
     halo_radii = np.asarray(halo_radii)
+    if halo_weights is not None:
+        halo_weights = np.asarray(halo_weights)
 
     if min_mass is not None:
         keep = halo_masses >= min_mass
         halo_positions = halo_positions[keep]
         halo_masses = halo_masses[keep]
         halo_radii = halo_radii[keep]
+        if halo_weights is not None:
+            halo_weights = halo_weights[keep]
 
     if batch_size is None:
         return _populate_and_filter(halo_positions, halo_masses, halo_radii,
-                                    model, key, max_satellites, profile)
+                                    model, key, max_satellites, profile, halo_weights)
 
     n_halos = halo_masses.shape[0]
     all_positions = []
     all_is_central = []
+    all_weights = [] if halo_weights is not None else None
+
     for i, start in enumerate(range(0, n_halos, batch_size)):
         end = min(start + batch_size, n_halos)
         batch_key = jax.random.fold_in(key, i)
+        batch_weights = halo_weights[start:end] if halo_weights is not None else None
         chunk = _populate_and_filter(
             halo_positions[start:end],
             halo_masses[start:end],
             halo_radii[start:end],
-            model, batch_key, max_satellites, profile,
+            model, batch_key, max_satellites, profile, batch_weights,
         )
         all_positions.append(chunk['positions'])
         all_is_central.append(chunk['is_central'])
+        if all_weights is not None:
+            all_weights.append(chunk['weights'])
 
-    return {
+    result = {
         'positions': np.concatenate(all_positions, axis=0),
         'is_central': np.concatenate(all_is_central, axis=0),
     }
+    if all_weights is not None:
+        result['weights'] = np.concatenate(all_weights, axis=0)
+    return result
 
 
 def _populate_and_filter(halo_positions, halo_masses, halo_radii,
-                         model, key, max_satellites, profile):
+                         model, key, max_satellites, profile, halo_weights=None):
     """Run _populate and return only valid galaxies as NumPy arrays."""
     result = _populate(halo_positions, halo_masses, halo_radii,
-                       model, key, max_satellites, profile)
+                       model, key, max_satellites, profile, halo_weights)
     mask = np.asarray(result['mask'])
-    return {
+    out = {
         'positions': np.asarray(result['positions'])[mask],
         'is_central': np.asarray(result['is_central'])[mask],
     }
+    if 'weights' in result:
+        out['weights'] = np.asarray(result['weights'])[mask]
+    return out
