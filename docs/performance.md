@@ -88,6 +88,43 @@ produces the same output — each batch's key is derived from its index via
 `devices=` requires `batch_size` to be set. Use `get_devices('gpu')` to
 obtain all available GPUs, falling back to CPU if none are present.
 
+### CPU benchmark (Perlmutter, 128-core node)
+
+Measured on a NERSC Perlmutter CPU node (2M halos, `batch_size=100_000`,
+`jit=True`) sweeping from 1 to 128 virtual devices:
+
+| N devices | Median (s) | Speedup | Efficiency |
+|----------:|-----------:|--------:|-----------:|
+|         1 |       5.69 |    1.0× |       100% |
+|         2 |       3.27 |    1.7× |        83% |
+|         4 |       2.30 |    2.5× |        60% |
+|         8 |       1.78 |    3.2× |        38% |
+|        16 |       1.47 |    3.9× |        23% |
+|        32 |       1.31 |    4.4× |        14% |
+|        64 |       1.30 |    4.4× |         7% |
+|       128 |       1.25 |    4.6× |         4% |
+
+Speedup saturates at **~4.5×** well before 128 devices. Two compounding
+effects explain the ceiling:
+
+- **Batch-count cap.** With 2M halos and `batch_size=100_000` there are only
+  20 batches. No matter how many threads are available, at most 20 can run
+  concurrently — extra workers sit idle.
+- **JAX internal threading.** XLA's CPU backend already dispatches each batch
+  across multiple cores via its own Eigen/BLAS thread pool. Outer
+  thread-level parallelism competes with this inner parallelism for the same
+  physical cores, so the marginal benefit of each additional outer thread
+  falls quickly.
+
+The **sweet spot on CPU is 4–8 devices**: efficiency is still 38–60% and the
+absolute wall time is near the achievable minimum for this batch size. Beyond
+that, adding threads yields diminishing returns.
+
+To push the parallelism further on a CPU node, reduce `batch_size` to
+create more independent batches (e.g. `batch_size=25_000` → 80 batches for
+2M halos), keeping in mind that smaller batches incur higher per-batch
+Python overhead.
+
 ## JIT-compiled repeated calls
 
 Pass `jit=True` to `populate()` to enable JAX JIT compilation. The compiled
