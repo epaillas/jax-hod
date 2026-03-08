@@ -144,46 +144,103 @@ gal_positions = result['positions'][result['mask']]
 
 ## Using AbacusSummit halos
 
-`jax-hod` ships with a reader for the
-[AbacusSummit](https://abacussummit.readthedocs.io) simulation suite.
-It wraps `abacusutils` (install with `pip install jax-hod[abacus]`) and
-returns arrays in the format expected by `populate`.
+`jax-hod` ships with two readers for the
+[AbacusSummit](https://abacussummit.readthedocs.io) simulation suite
+(both require `pip install jax-hod[abacus]`).
+
+### Full catalogue (`load_abacus_halos`)
+
+Reads the complete CompaSO halo catalogue from ASDF files — all
+~400 M halos for the base box. Straightforward, but see the memory
+discussion above before attempting this on a laptop.
+
+### HOD subsample (`load_abacus_hod_halos`)  ← recommended for HOD work
+
+`abacusutils` ships a script, `abacusnbody.hod.prepare_sim`, that
+generates a mass-dependent probabilistic subsample of the full catalogue
+and writes it to slab-wise HDF5 files.  The subsample retains essentially
+all halos that could plausibly host a galaxy and drops the rest, making it
+50–100× smaller than the full catalogue.
+
+**Step 1 — generate the subsample (once per simulation)**
+
+```bash
+python -m abacusnbody.hod.prepare_sim --path2config config/abacus_hod.yaml
+```
+
+This produces files under `{subsample_dir}/{sim_name}/z{z}/`:
+
+```
+halos_xcom_0_seed600_abacushod_oldfenv_new.h5
+halos_xcom_1_seed600_abacushod_oldfenv_new.h5
+...
+particles_xcom_0_seed600_abacushod_oldfenv_new.h5
+...
+```
+
+**Step 2 — load and populate**
 
 ```python
 import jax
 from jaxhod import Zheng07, populate
-from jaxhod.simulations import load_abacus_halos
+from jaxhod.simulations import load_abacus_hod_halos
 
-# Load halos from AbacusSummit_base_c000_ph000 at z=0.5
-halos = load_abacus_halos(
+model = Zheng07(log_Mmin=13.0, sigma_logM=0.5, log_M0=13.0, log_M1=14.0, alpha=1.0)
+
+halos = load_abacus_hod_halos(
+    subsample_dir='/path/to/subsamples',
     sim_dir='/global/cfs/cdirs/desi/cosmosim/Abacus',
-    cosmology='c000',
-    phase='ph000',
+    sim_name='AbacusSummit_base_c000_ph000',
     redshift=0.5,
-    min_mass=1e12,    # Msun/h — skip poorly-resolved halos
 )
 
-# halos['positions']  : (N, 3) Mpc/h
-# halos['masses']     : (N,)   Msun/h
-# halos['radii']      : (N,)   Mpc/h  (r100 of the L2 subhalo)
-# halos['velocities'] : (N, 3) km/s
+# halos['positions']  : (N_sub, 3) Mpc/h   — much smaller than the full cat
+# halos['masses']     : (N_sub,)   Msun/h
+# halos['radii']      : (N_sub,)   Mpc/h  (r98 of the L2 subhalo)
+# halos['velocities'] : (N_sub, 3) km/s
+# halos['weights']    : (N_sub,)   inverse subsampling probability
 # halos['header']     : dict with BoxSize, ParticleMassHMsun, etc.
 
-# Populate with the Zheng+07 HOD model
-model = Zheng07(log_Mmin=13.0, sigma_logM=0.5, log_M0=13.0, log_M1=14.0, alpha=1.0)
 key = jax.random.PRNGKey(0)
-
 result = populate(
     halos['positions'],
     halos['masses'],
     halos['radii'],
     model,
     key,
+    batch_size=1_000_000,
 )
 ```
 
-The `header` dict contains the full simulation metadata, including `BoxSize`
-(Mpc/h) and `ParticleMassHMsun`, which you may need for downstream analysis.
+The `weights` array (``multi_halos`` from AbacusHOD) is the inverse of each
+halo's subsampling probability.  High-mass halos have weight ≈ 1; lower-mass
+halos may have weight > 1 because only a fraction were retained.  For number-
+density estimates you should weight by this field.
+
+For ELG/QSO tracers, pass ``mt=True`` to load the multi-tracer subsample:
+
+```python
+halos = load_abacus_hod_halos(..., mt=True)
+```
+
+### Full catalogue (`load_abacus_halos`)
+
+For cases where you need the complete snapshot:
+
+```python
+from jaxhod.simulations import load_abacus_halos
+
+halos = load_abacus_halos(
+    sim_dir='/global/cfs/cdirs/desi/cosmosim/Abacus',
+    cosmology='c000',
+    phase='ph000',
+    redshift=0.5,
+    min_mass=1e12,
+)
+```
+
+See the memory section above for caveats about loading the full ~400 M halo
+catalogue on a workstation.
 
 ## Example notebook
 

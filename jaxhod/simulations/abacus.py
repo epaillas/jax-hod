@@ -1,14 +1,23 @@
 """
-Reader for AbacusSummit halo catalogues.
+Readers for AbacusSummit halo catalogues.
 
-AbacusSummit is a suite of large cosmological N-body simulations run with the
-Abacus code. Halo catalogues are produced by the CompaSO on-the-fly halo finder
-and stored as ASDF files. This module wraps the ``abacusutils`` package to
-extract the minimal set of halo properties required by ``jax-hod``.
+Two entry points are provided:
+
+``load_abacus_halos``
+    Reads the full CompaSO halo catalogue from ASDF files.  Simple and
+    accurate, but requires loading the entire snapshot (tens of GB for
+    AbacusSummit base).
+
+``load_abacus_hod_halos``
+    Reads the pre-generated HOD subsample produced by
+    ``abacusnbody.hod.prepare_sim``.  The subsample is a small fraction of
+    the full catalogue (a few percent by halo count) stored as slab-wise HDF5
+    files, making this the memory-efficient path for HOD work.
 
 Reference: Maksimova et al. 2021 (https://arxiv.org/abs/2110.11398)
 """
 
+import re
 from pathlib import Path
 
 import numpy as np
@@ -168,5 +177,204 @@ def load_abacus_halos(
             if min_mass is not None:
                 data = data[mask]
             result[field] = data
+
+    return result
+
+
+def load_abacus_hod_halos(
+    subsample_dir,
+    sim_dir,
+    sim_name,
+    redshift,
+    mt=False,
+    seed=600,
+    fields=None,
+):
+    """
+    Load halo positions, masses, radii and velocities from an AbacusHOD
+    subsample, ready to be passed directly to ``populate()``.
+
+    The subsample is produced by ``abacusnbody.hod.prepare_sim`` (from the
+    ``abacusutils`` package) before running AbacusHOD.  It is a
+    mass-dependent probabilistic downsample of the full halo catalogue stored
+    as slab-wise HDF5 files, and is typically 50–100× smaller than the full
+    CompaSO catalogue — making it the recommended input for HOD work on large
+    simulations.
+
+    Parameters
+    ----------
+    subsample_dir : str or Path
+        Root directory that was passed as ``subsample_dir`` to
+        ``prepare_sim``.  The actual slab files live under
+        ``{subsample_dir}/{sim_name}/z{redshift:.3f}/``.
+    sim_dir : str or Path
+        Path to the original AbacusSummit simulation directory (the one
+        containing ``{sim_name}/halos/``).  Used *only* to read the ASDF
+        file header for ``ParticleMassHMsun`` and ``BoxSize``; no halo
+        data is loaded from this path.
+    sim_name : str
+        Full simulation name, e.g. ``'AbacusSummit_base_c000_ph000'``.
+    redshift : float
+        Snapshot redshift, e.g. ``0.5``.  Must match the ``z_mock`` used
+        when running ``prepare_sim``.
+    mt : bool, optional
+        If ``True``, load the multi-tracer (MT) subsample files, which are
+        generated when ELG or QSO tracers are enabled in ``prepare_sim``.
+        If ``False`` (default), load the LRG-only files.
+    seed : int, optional
+        Random seed embedded in the subsample filename.  Matches the
+        ``--newseed`` argument passed to ``prepare_sim`` (default 600).
+    fields : list of str, optional
+        Extra halo fields from the HDF5 dataset to include in the returned
+        dict.  Available fields beyond the defaults are: ``'r25_L2com'``,
+        ``'r90_L2com'``, ``'sigmav3d_L2com'``, ``'deltac_rank'``,
+        ``'fenv_rank'``, ``'shear_rank'``, ``'randoms'``.
+
+    Returns
+    -------
+    dict with keys:
+
+        ``positions``  : ndarray, shape (N, 3)
+            Halo centre-of-mass positions in Mpc/h.
+        ``masses``     : ndarray, shape (N,)
+            Halo masses in Msun/h (= particle count × particle mass).
+        ``radii``      : ndarray, shape (N,)
+            Halo virial radii using r98 of the L2 subhalo, in Mpc/h.
+            This matches what AbacusHOD uses internally.
+        ``velocities`` : ndarray, shape (N, 3)
+            Halo centre-of-mass velocities in km/s.
+        ``weights``    : ndarray, shape (N,)
+            Inverse subsampling probability (``multi_halos`` field).
+            High-mass halos have weight ≈ 1; low-mass halos may have
+            weight > 1 because only a fraction of them were kept in the
+            subsample.  Pass these as importance weights if you need
+            unbiased number-density estimates.
+        ``header``     : dict
+            Simulation metadata including ``BoxSize`` (Mpc/h),
+            ``ParticleMassHMsun``, ``Redshift``, etc.
+
+    Raises
+    ------
+    ImportError
+        If ``h5py`` or ``asdf`` are not installed (both ship with
+        ``abacusutils``).
+    FileNotFoundError
+        If the subsample directory or ASDF header files are not found.
+
+    Notes
+    -----
+    The subsample files are named::
+
+        halos_xcom_{i}_seed{seed}_abacushod_oldfenv[_MT]_new.h5
+
+    where ``i`` is the slab index (0, 1, 2, …).  Multiple slabs are read
+    and concatenated automatically.
+
+    Because low-mass halos are probabilistically downsampled, the subsample
+    is not a complete catalogue below the HOD threshold.  When passing the
+    result to ``populate()``, no additional ``min_mass`` cut is needed —
+    the subsampling scheme in ``prepare_sim`` already removes halos that
+    cannot host galaxies for typical LRG/ELG parameters.
+
+    Examples
+    --------
+    >>> from jaxhod.simulations import load_abacus_hod_halos
+    >>> halos = load_abacus_hod_halos(
+    ...     subsample_dir='/path/to/subsamples',
+    ...     sim_dir='/path/to/AbacusSummit',
+    ...     sim_name='AbacusSummit_base_c000_ph000',
+    ...     redshift=0.5,
+    ... )
+    >>> halos['positions'].shape   # (N_subsample, 3) — much smaller than full cat
+    >>> halos['weights'][:5]       # inverse subsampling probabilities
+    """
+    try:
+        import asdf
+        import h5py
+    except ImportError:
+        raise ImportError(
+            'h5py and asdf are required to load AbacusHOD subsamples. '
+            'Install them with: pip install abacusutils'
+        )
+
+    subsample_dir = Path(subsample_dir)
+    sim_dir       = Path(sim_dir)
+    z_str         = f'z{redshift:.3f}'
+
+    slab_dir = subsample_dir / sim_name / z_str
+
+    if not slab_dir.exists():
+        raise FileNotFoundError(
+            f'Subsample directory not found:\n  {slab_dir}\n'
+            'Run abacusnbody.hod.prepare_sim first, or check subsample_dir, '
+            'sim_name, and redshift.'
+        )
+
+    # ------------------------------------------------------------------
+    # Read the particle mass from the simulation ASDF header.
+    # We open just the first slab lazily — no halo data is loaded.
+    # ------------------------------------------------------------------
+    halo_info_dir = sim_dir / sim_name / 'halos' / z_str / 'halo_info'
+    halo_info_files = sorted(halo_info_dir.glob('*.asdf'))
+    if not halo_info_files:
+        raise FileNotFoundError(
+            f'No ASDF halo-info files found in:\n  {halo_info_dir}\n'
+            'Check sim_dir and sim_name.'
+        )
+    with asdf.open(str(halo_info_files[0]), lazy_load=True, copy_arrays=False) as af:
+        header = dict(af['header'])
+    particle_mass = header['ParticleMassHMsun']   # Msun/h
+
+    # ------------------------------------------------------------------
+    # Discover and sort slab files by their integer index.
+    # ------------------------------------------------------------------
+    mt_tag    = '_MT' if mt else ''
+    glob_pat  = f'halos_xcom_*_seed{seed}_abacushod_oldfenv{mt_tag}_new.h5'
+    slab_files = sorted(
+        slab_dir.glob(glob_pat),
+        key=lambda p: int(re.search(r'halos_xcom_(\d+)_', p.name).group(1)),
+    )
+    if not slab_files:
+        raise FileNotFoundError(
+            f'No subsample halo files matching\n  {glob_pat}\nfound in\n  {slab_dir}\n'
+            f'Check mt={mt} and seed={seed}.'
+        )
+
+    # ------------------------------------------------------------------
+    # Load and concatenate all slabs.
+    # ------------------------------------------------------------------
+    _default_fields = {'x_L2com', 'v_L2com', 'N', 'r98_L2com', 'multi_halos'}
+    extra_fields = [f for f in (fields or []) if f not in _default_fields]
+
+    positions_list  = []
+    velocities_list = []
+    masses_list     = []
+    radii_list      = []
+    weights_list    = []
+    extras          = {f: [] for f in extra_fields}
+
+    for slab_path in slab_files:
+        with h5py.File(slab_path, 'r') as f:
+            h = f['halos']
+            positions_list.append(np.array(h['x_L2com'],   dtype=np.float32))
+            velocities_list.append(np.array(h['v_L2com'],  dtype=np.float32))
+            masses_list.append(
+                np.array(h['N'], dtype=np.float32) * particle_mass
+            )
+            radii_list.append(np.array(h['r98_L2com'],    dtype=np.float32))
+            weights_list.append(np.array(h['multi_halos'], dtype=np.float32))
+            for field in extra_fields:
+                extras[field].append(np.array(h[field]))
+
+    result = {
+        'positions':  np.concatenate(positions_list,  axis=0),
+        'masses':     np.concatenate(masses_list,     axis=0),
+        'radii':      np.concatenate(radii_list,      axis=0),
+        'velocities': np.concatenate(velocities_list, axis=0),
+        'weights':    np.concatenate(weights_list,    axis=0),
+        'header':     header,
+    }
+    for field in extra_fields:
+        result[field] = np.concatenate(extras[field], axis=0)
 
     return result
