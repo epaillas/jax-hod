@@ -61,6 +61,47 @@ result = populate(..., profile=NFW(concentration=concentrations))
 result = populate(..., profile=UniformSphere())
 ```
 
+## Memory-efficient population of large catalogues
+
+Full N-body simulations (e.g. AbacusSummit base: ~80M halos) can exhaust GPU or
+host memory when the entire catalogue is loaded at once, because `_populate`
+allocates a `(N_halos, max_satellites, 3)` satellite-position array before any
+galaxies are drawn.
+
+Two options can be combined to reduce peak memory:
+
+**`min_mass`** — discard halos that cannot plausibly host a galaxy before
+allocating any JAX arrays. Halos far below `log_Mmin` have negligible occupation
+probability, so they contribute nothing but memory:
+
+```python
+# Halos more than ~2 dex below log_Mmin are effectively empty
+result = populate(
+    halos['positions'], halos['masses'], halos['radii'],
+    model, key,
+    min_mass=10 ** (model.log_Mmin - 2),
+)
+```
+
+**`batch_size`** — process the catalogue in sequential chunks so that peak
+memory scales with `batch_size × max_satellites` rather than the full catalogue.
+Each batch gets an independent derived key; results are concatenated
+automatically:
+
+```python
+result = populate(
+    halos['positions'], halos['masses'], halos['radii'],
+    model, key,
+    min_mass=10 ** (model.log_Mmin - 2),
+    batch_size=500_000,
+)
+```
+
+Note: because each batch uses a different derived key, a batched call produces
+statistically equivalent but not bitwise-identical results compared to an
+unbatched call with the same `key`. Results are fully reproducible across
+repeated calls given the same `key` and `batch_size`.
+
 ## JIT-compiled repeated calls
 
 `populate` converts results to NumPy arrays, so it cannot be wrapped directly

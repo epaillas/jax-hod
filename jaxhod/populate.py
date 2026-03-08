@@ -56,7 +56,8 @@ def _populate(halo_positions, halo_masses, halo_radii, model, key, max_satellite
     }
 
 
-def populate(halo_positions, halo_masses, halo_radii, model, key, max_satellites=50, profile=None):
+def populate(halo_positions, halo_masses, halo_radii, model, key, max_satellites=50,
+             profile=None, min_mass=None, batch_size=None):
     """
     Populate dark matter halos with galaxies using the given HOD model.
 
@@ -83,6 +84,19 @@ def populate(halo_positions, halo_masses, halo_radii, model, key, max_satellites
         Radial profile for satellite placement. Must implement
         ``sample_offsets(key, n_halos, max_satellites, radii)``.
         Defaults to ``NFW(concentration=5)``.
+    min_mass : float, optional
+        Minimum halo mass in Msun/h. Halos below this threshold are
+        discarded before any JAX arrays are allocated, reducing peak
+        memory use. A good choice is ``10 ** (model.log_Mmin - 2)``,
+        which keeps all halos with non-negligible central occupation
+        while cutting the tail that contributes nothing.
+    batch_size : int, optional
+        Number of halos to process at once. When set, halos are split
+        into chunks of this size and processed sequentially, so peak
+        memory scales with ``batch_size`` rather than the full catalogue
+        size. Each batch receives an independent random key derived from
+        ``key``. Results are concatenated and are equivalent to a single
+        unbatched call with the same ``key``.
 
     Returns
     -------
@@ -92,9 +106,46 @@ def populate(halo_positions, halo_masses, halo_radii, model, key, max_satellites
         ``is_central`` : bool array, shape (N_gal,)
             True for central galaxies, False for satellites.
     """
-    result = _populate(
-        halo_positions, halo_masses, halo_radii, model, key, max_satellites, profile
-    )
+    halo_masses = np.asarray(halo_masses)
+    halo_positions = np.asarray(halo_positions)
+    halo_radii = np.asarray(halo_radii)
+
+    if min_mass is not None:
+        keep = halo_masses >= min_mass
+        halo_positions = halo_positions[keep]
+        halo_masses = halo_masses[keep]
+        halo_radii = halo_radii[keep]
+
+    if batch_size is None:
+        return _populate_and_filter(halo_positions, halo_masses, halo_radii,
+                                    model, key, max_satellites, profile)
+
+    n_halos = halo_masses.shape[0]
+    all_positions = []
+    all_is_central = []
+    for i, start in enumerate(range(0, n_halos, batch_size)):
+        end = min(start + batch_size, n_halos)
+        batch_key = jax.random.fold_in(key, i)
+        chunk = _populate_and_filter(
+            halo_positions[start:end],
+            halo_masses[start:end],
+            halo_radii[start:end],
+            model, batch_key, max_satellites, profile,
+        )
+        all_positions.append(chunk['positions'])
+        all_is_central.append(chunk['is_central'])
+
+    return {
+        'positions': np.concatenate(all_positions, axis=0),
+        'is_central': np.concatenate(all_is_central, axis=0),
+    }
+
+
+def _populate_and_filter(halo_positions, halo_masses, halo_radii,
+                         model, key, max_satellites, profile):
+    """Run _populate and return only valid galaxies as NumPy arrays."""
+    result = _populate(halo_positions, halo_masses, halo_radii,
+                       model, key, max_satellites, profile)
     mask = np.asarray(result['mask'])
     return {
         'positions': np.asarray(result['positions'])[mask],

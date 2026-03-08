@@ -112,6 +112,52 @@ class TestPopulate:
         r_uni = populate(positions, masses, radii, model, key, profile=UniformSphere())
         assert not np.allclose(r_nfw['positions'], r_uni['positions'])
 
+    def test_min_mass_reduces_galaxy_count(self, model, halos):
+        positions, masses, radii = halos
+        key = jax.random.PRNGKey(20)
+        result_all = populate(positions, masses, radii, model, key)
+        # A high min_mass cut should produce fewer or equal galaxies
+        result_cut = populate(positions, masses, radii, model, key,
+                              min_mass=10 ** model.log_Mmin)
+        assert result_cut['positions'].shape[0] <= result_all['positions'].shape[0]
+
+    def test_min_mass_above_all_halos_returns_empty(self, model, halos):
+        positions, masses, radii = halos
+        result = populate(positions, masses, radii, model, jax.random.PRNGKey(21),
+                          min_mass=1e20)
+        assert result['positions'].shape[0] == 0
+
+    def test_batch_size_produces_galaxies(self, model, halos):
+        positions, masses, radii = halos
+        result = populate(positions, masses, radii, model, jax.random.PRNGKey(30),
+                          batch_size=100)
+        assert result['positions'].shape[0] > 0
+
+    def test_batch_size_output_shapes_consistent(self, model, halos):
+        positions, masses, radii = halos
+        result = populate(positions, masses, radii, model, jax.random.PRNGKey(31),
+                          batch_size=50)
+        n_gal = result['positions'].shape[0]
+        assert result['positions'].shape == (n_gal, 3)
+        assert result['is_central'].shape == (n_gal,)
+
+    def test_batch_size_one(self, model, halos):
+        # Extreme case: one halo per batch
+        positions, masses, radii = halos
+        result = populate(positions, masses, radii, model, jax.random.PRNGKey(32),
+                          batch_size=1)
+        assert result['positions'].shape[0] > 0
+
+    def test_batch_larger_than_catalog(self, model, halos):
+        # batch_size > N_halos: single batch, should still return valid output
+        positions, masses, radii = halos
+        result = populate(positions, masses, radii, model, jax.random.PRNGKey(33),
+                          batch_size=len(masses) + 1000)
+        n_gal = result['positions'].shape[0]
+        assert result['positions'].shape == (n_gal, 3)
+        assert result['is_central'].shape == (n_gal,)
+        assert n_gal > 0
+
     def test_nfw_per_halo_concentration(self, model, halos):
         positions, masses, radii = halos
         n = masses.shape[0]
