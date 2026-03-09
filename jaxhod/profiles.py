@@ -260,7 +260,10 @@ class SubsampledParticles:
         flat_col = np.arange(len(sorted_hids)) - halo_starts[sorted_hids]  # (N_particles,)
         offsets[flat_row, flat_col] = sorted_pos - halo_positions[flat_row]
 
-        return cls(particle_offsets=offsets, n_particles=n_particles)
+        return cls(
+            particle_offsets=jax.device_put(offsets),
+            n_particles=n_particles,
+        )
 
     def sample_offsets(
         self,
@@ -296,8 +299,7 @@ class SubsampledParticles:
         idx = jnp.floor(floats * n_p_safe[:, None]).astype(jnp.int32)
         idx = jnp.clip(idx, 0, max_p - 1)
 
-        particle_offsets_jax = jnp.asarray(self.particle_offsets)
-        offsets = particle_offsets_jax[jnp.arange(n_halos)[:, None], idx]
+        offsets = self.particle_offsets[jnp.arange(n_halos)[:, None], idx]
 
         # Fallback to UniformSphere for halos with 0 particles
         fallback = UniformSphere().sample_offsets(key, n_halos, max_satellites, radii)
